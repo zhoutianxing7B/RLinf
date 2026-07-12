@@ -45,6 +45,18 @@ class PipelineEmbodiedFSDPActor(EmbodiedFSDPActor):
             n_train_chunk_steps=self.cfg.env.train.max_steps_per_rollout_epoch
             // self.cfg.actor.model.num_action_chunks,
         )
+        max_train_samples = self.cfg.actor.get("max_train_samples_per_rollout", None)
+        if max_train_samples is not None:
+            max_micro_batches = self.compute_micro_batches(
+                total_num_envs=int(max_train_samples),
+                actor_world_size=self._world_size,
+                micro_batch_size=self.cfg.actor.micro_batch_size,
+                rollout_epoch=1,
+                n_train_chunk_steps=1,
+            )
+            self.micro_batches_per_step = min(
+                self.micro_batches_per_step, max_micro_batches
+            )
         assert self.micro_batches_per_step % self.gradient_accumulation == 0, (
             f"micro_batches_per_step ({self.micro_batches_per_step}) must be divisible by "
             f"gradient_accumulation ({self.gradient_accumulation})."

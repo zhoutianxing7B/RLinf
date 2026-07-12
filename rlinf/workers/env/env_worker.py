@@ -47,6 +47,7 @@ from rlinf.utils.nested_dict_process import (
     update_nested_cfg,
 )
 from rlinf.utils.placement import HybridComponentPlacement
+from rlinf.utils.rollout_sampling import evenly_spaced_indices
 from rlinf.utils.utils import (
     flatten_embodied_batch,
     pack_batch,
@@ -1415,6 +1416,35 @@ class EnvWorker(Worker):
         )
         num_micro_batches = batch_size // micro_batch_size
         micro_batches = split_dict_to_chunk(flatten_batch, num_micro_batches, dim=0)
+        max_train_samples = self.cfg.actor.get("max_train_samples_per_rollout", None)
+        if max_train_samples is not None:
+            actor_world_size = self._component_placement.get_world_size("actor")
+            source_count = len(self.pipeline_actor_env_ranks[actor_rank])
+            per_micro_batch_group = (
+                actor_world_size * self.cfg.actor.micro_batch_size
+            )
+            if int(max_train_samples) % per_micro_batch_group != 0:
+                raise ValueError(
+                    "max_train_samples_per_rollout must be divisible by "
+                    "actor_world_size * micro_batch_size; "
+                    f"got {max_train_samples=}, {actor_world_size=}, "
+                    f"micro_batch_size={self.cfg.actor.micro_batch_size}."
+                )
+            target_micro_batches = (
+                int(max_train_samples) // per_micro_batch_group
+            )
+            if target_micro_batches % source_count != 0:
+                raise ValueError(
+                    "max_train_samples_per_rollout must allocate an equal number "
+                    f"of micro-batches to each env source; got {target_micro_batches=} "
+                    f"and {source_count=}."
+                )
+            local_target = target_micro_batches // source_count
+            if local_target < len(micro_batches):
+                selected = evenly_spaced_indices(
+                    len(micro_batches), local_target
+                )
+                micro_batches = [micro_batches[index] for index in selected]
         return [pack_batch(micro_batch) for micro_batch in micro_batches]
 
     async def send_rollout_trajectories_pipeline(
