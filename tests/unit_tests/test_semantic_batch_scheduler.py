@@ -34,6 +34,7 @@ from rlinf.models.embodiment.gr00t.gr00t_n1d7.semantic_server import (
     payload_to_batch_feature,
     quantize_semantic_transport,
 )
+from rlinf.scheduler.hardware.accelerators.accelerator import AcceleratorType
 from rlinf.utils.metric_utils import compute_evaluate_metrics
 from rlinf.workers.env.env_worker import (
     EnvWorker,
@@ -1932,6 +1933,8 @@ def test_continued_eval_bootstrap_uses_prepared_reset_state_ids():
 
 def test_non_auto_reset_eval_restarts_once_then_continues_cursor():
     worker = object.__new__(EnvWorker)
+    worker._accelerator_type = AcceleratorType.NO_ACCEL
+    worker._timer_metrics = {}
     worker.eval_rollout_epoch = 3
     worker.stage_num = 1
     worker.n_eval_chunk_steps = 0
