@@ -449,6 +449,7 @@ class EnvWorker(Worker):
             action_dim=self.model_cfg.action_dim,
             policy=self.model_cfg.get("policy_setup", None),
             wm_env_type=self.cfg.env.train.get("wm_env_type", None),
+            env_cfg=self.cfg.env.train,
         )
         if isinstance(chunk_actions, dict):
             chunk_actions["actions"] = exec_actions
@@ -537,6 +538,7 @@ class EnvWorker(Worker):
             action_dim=self.model_cfg.action_dim,
             policy=self.model_cfg.get("policy_setup", None),
             wm_env_type=self.cfg.env.eval.get("wm_env_type", None),
+            env_cfg=self.cfg.env.eval,
         )
         env_info = {}
 
@@ -1185,10 +1187,27 @@ class EnvWorker(Worker):
                 rewards = self.compute_bootstrap_rewards(
                     env_output, rollout_result.bootstrap_values, reward_model_output
                 )
+                final_actions = rollout_result.forward_inputs.get("action", None)
+                final_forward_inputs = rollout_result.forward_inputs
+                if (
+                    OmegaConf.select(self.cfg, "algorithm.loss_type", default="")
+                    == "embodied_dagger"
+                ):
+                    final_actions = None
+                    final_forward_inputs = {}
+
                 chunk_step_result = ChunkStepResult(
+                    actions=final_actions,
+                    prev_logprobs=(
+                        rollout_result.prev_logprobs
+                        if self.collect_prev_infos
+                        else None
+                    ),
                     prev_values=(
                         rollout_result.prev_values if self.collect_prev_infos else None
                     ),
+                    forward_inputs=final_forward_inputs,
+                    versions=rollout_result.versions,
                     dones=env_output.dones,
                     truncations=env_output.truncations,
                     terminations=env_output.terminations,
@@ -1259,6 +1278,7 @@ class EnvWorker(Worker):
 
         return env_metrics
 
+    @Worker.timer("evaluate")
     def evaluate(self, input_channel: Channel, rollout_channel: Channel):
         eval_metrics = defaultdict(list)
         for eval_rollout_epoch in range(self.eval_rollout_epoch):
@@ -1360,12 +1380,21 @@ class EnvWorker(Worker):
         # Advantages/returns are rollout-level quantities, so compute them before
         # splitting. After this point each channel item is an actor micro-batch that can
         # be trained directly without reconstructing the full rollout batch on actor.
+        assert not (
+            self.use_training_pipeline and self.cfg.algorithm.adv_type == "opd"
+        ), (
+            "OPD does not support runner.use_training_pipeline=True because "
+            "teacher_logprobs are computed on actor workers after rollout."
+        )
+
         kwargs = {
             "task_type": self.cfg.runner.task_type,
             "adv_type": self.cfg.algorithm.adv_type,
             "rewards": rollout_batch["rewards"],
             "dones": rollout_batch["dones"],
             "values": rollout_batch.get("prev_values", None),
+            "prev_logprobs": rollout_batch.get("prev_logprobs", None),
+            "num_action_chunks": self.cfg.actor.model.num_action_chunks,
             "gamma": self.cfg.algorithm.get("gamma", 1),
             "gae_lambda": self.cfg.algorithm.get("gae_lambda", 1),
             "group_size": self.cfg.algorithm.get("group_size", 8),

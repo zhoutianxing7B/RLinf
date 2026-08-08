@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import inspect
 import multiprocessing as mp
 import os
 import signal
@@ -50,13 +51,20 @@ def _run_sglang_server(server_args_dict: dict, ready_pipe) -> None:
     from sglang.srt.entrypoints.http_server import launch_server
 
     server_args = ServerArgs(**server_args_dict)
+
+    # sglang dropped pipe_finish_writer after 0.5.4; readiness is established by
+    # polling /health either way, so the pipe is only used to surface exceptions.
+    launch_kwargs = {}
+    if "pipe_finish_writer" in inspect.signature(launch_server).parameters:
+        launch_kwargs["pipe_finish_writer"] = ready_pipe
+
     # Strip proxy env vars so sglang's internal HTTP calls (e.g. the
     # tokenizer-manager / scheduler IPC that /get_server_info touches)
     # don't tunnel through a user-configured proxy — otherwise the router's
     # discover_metadata step hangs and worker registration fails.
     with no_proxy_env():
         try:
-            launch_server(server_args, pipe_finish_writer=ready_pipe)
+            launch_server(server_args, **launch_kwargs)
         except Exception as e:  # pragma: no cover — surface failures to parent
             try:
                 ready_pipe.send(repr(e))
@@ -82,6 +90,12 @@ def _wait_for_http_health(host: str, port: int, timeout: float = 300.0) -> None:
         f"sglang server at {url} did not become healthy within {timeout:.0f}s "
         f"(last error: {last_err!r})."
     )
+
+
+# sglang derives its gRPC port as ``port + SGLANG_GRPC_PORT_OFFSET`` and rejects
+# the result above 65535, so the HTTP port has to leave room for it.
+SGLANG_GRPC_PORT_OFFSET = 10000
+MAX_SGLANG_HTTP_PORT = 65535 - SGLANG_GRPC_PORT_OFFSET
 
 
 class SGLangServerWorker(Worker):
@@ -121,9 +135,6 @@ class SGLangServerWorker(Worker):
         self._server_port: Optional[int] = None
         self._ready_pipe = None
 
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
     def init_server(self) -> None:
         """Spawn the sglang HTTP server subprocess and wait for /health.
 
@@ -140,7 +151,7 @@ class SGLangServerWorker(Worker):
         # internal torch.distributed bootstrap. ``acquire_free_port``
         # uses the worker's PortLock so neither port collides with any
         # other worker on this node.
-        http_port = self.acquire_free_port()
+        http_port = self.acquire_free_port(max_port_num=MAX_SGLANG_HTTP_PORT)
         dist_port = self.acquire_free_port()
 
         sglang_kwargs = OmegaConf.to_container(self._sglang_cfg, resolve=True)
@@ -154,6 +165,30 @@ class SGLangServerWorker(Worker):
             f"http=:{http_port}, dist_init={server_args.dist_init_addr}, "
             f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', '')}"
         )
+
+        # Pin the spawned server to torch's bundled CUDA runtime. With
+        # `enable_memory_saver`, sglang LD_PRELOADs a torch_memory_saver hook
+        # that has no RUNPATH, so it would otherwise resolve libcudart via
+        # ld.so.cache to the (older) system CUDA and crash torch with
+        # "undefined symbol: cudaGetDriverEntryPointByVersion". LD_LIBRARY_PATH
+        # is searched before ld.so.cache; the spawned child inherits it.
+        try:
+            import nvidia.cuda_runtime
+
+            _cudart_lib = os.path.join(
+                os.path.dirname(nvidia.cuda_runtime.__file__), "lib"
+            )
+            existing_paths = [
+                path
+                for path in os.environ.get("LD_LIBRARY_PATH", "").split(os.pathsep)
+                if path and path != _cudart_lib
+            ]
+            os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(
+                [_cudart_lib, *existing_paths]
+            )
+        except ImportError:
+            # torch built against system/conda CUDA (no bundled runtime).
+            pass
 
         ctx = mp.get_context("spawn")
         parent_pipe, child_pipe = ctx.Pipe(duplex=False)
