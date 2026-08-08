@@ -151,7 +151,9 @@ class AsyncEmbodiedRunner(EmbodiedRunner):
         if not env_decoupled_mode:
             rollout_handle.wait()
         eval_metrics_list = [results for results in env_results if results is not None]
-        eval_metrics = compute_evaluate_metrics(eval_metrics_list)
+        eval_metrics = compute_evaluate_metrics(
+            eval_metrics_list, deduplicate_trials=True
+        )
         return eval_metrics
 
     def run(self):

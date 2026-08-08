@@ -36,6 +36,10 @@ from rlinf.hybrid_engines.weight_syncer import WeightSyncer
 from rlinf.models import get_model
 from rlinf.models.embodiment.base_policy import BasePolicy
 from rlinf.scheduler import Channel, Cluster, Worker, split_channel_message
+from rlinf.utils.checkpoint import (
+    gr00t_delay_adapter_missing_prefixes,
+    load_state_dict_with_allowed_missing,
+)
 from rlinf.utils.placement import HybridComponentPlacement
 
 
@@ -147,8 +151,53 @@ class MultiStepRolloutWorker(Worker):
         self.hf_model: BasePolicy = get_model(rollout_model_config)
 
         if self.cfg.runner.get("ckpt_path", None):
+            self._logger.info(
+                f"Loading rollout override checkpoint from {self.cfg.runner.ckpt_path}"
+            )
             model_dict = torch.load(self.cfg.runner.ckpt_path)
-            self.hf_model.load_state_dict(model_dict)
+            dit_only = bool(
+                self.model_cfg.get("rl_head_config", {}).get(
+                    "drop_local_backbone", False
+                )
+            )
+            if dit_only:
+                target_keys = set(self.hf_model.state_dict())
+                unexpected_keys = set(model_dict) - target_keys
+                invalid_keys = [
+                    key for key in unexpected_keys if not key.startswith("backbone.")
+                ]
+                if invalid_keys:
+                    raise RuntimeError(
+                        "DiT-only rollout checkpoint has unexpected non-backbone keys: "
+                        f"{sorted(invalid_keys)}"
+                    )
+                model_dict = {
+                    key: value
+                    for key, value in model_dict.items()
+                    if key in target_keys
+                }
+                self._logger.info(
+                    "Discarded %d frozen backbone tensors from the DiT-only "
+                    "rollout checkpoint",
+                    len(unexpected_keys),
+                )
+            if dit_only:
+                missing_keys = load_state_dict_with_allowed_missing(
+                    self.hf_model,
+                    model_dict,
+                    allowed_missing_prefixes=gr00t_delay_adapter_missing_prefixes(
+                        self.model_cfg.get("rl_head_config", {})
+                    ),
+                )
+                if missing_keys:
+                    self._logger.info(
+                        "Initialized %d new value-head tensors outside the rollout "
+                        "override checkpoint",
+                        len(missing_keys),
+                    )
+            else:
+                self.hf_model.load_state_dict(model_dict)
+            self._logger.info("Loaded rollout override checkpoint successfully")
 
         rlt_feature_model_config = OmegaConf.select(
             self.cfg, "rollout.rlt_feature_model", default=None
@@ -526,6 +575,14 @@ class MultiStepRolloutWorker(Worker):
                     env_obs=env_obs,
                     **kwargs,
                 )
+                semantic_fetch_s = getattr(
+                    self.hf_model, "_last_semantic_fetch_s", None
+                )
+                if semantic_fetch_s is not None:
+                    tag = "predict/semantic_fetch"
+                    self._timer_metrics[tag] = self._timer_metrics.get(
+                        tag, 0.0
+                    ) + float(semantic_fetch_s)
 
             # Decide re-label or not
             if (
@@ -942,10 +999,16 @@ class MultiStepRolloutWorker(Worker):
         merged_obs = _merge_obs_dicts(obs_dicts)
         merged_final_obs = None
         if any(final_obs is not None for final_obs in final_obs_list):
-            final_obs_or_obs = [
-                final_obs if final_obs is not None else obs_dict
-                for obs_dict, final_obs in zip(obs_dicts, final_obs_list)
-            ]
+            final_obs_or_obs = []
+            for obs_dict, final_obs in zip(obs_dicts, final_obs_list):
+                if final_obs is None:
+                    final_obs_or_obs.append(obs_dict)
+                    continue
+                final_obs_with_metadata = dict(final_obs)
+                for key, value in obs_dict.items():
+                    if key.startswith("__rlinf_semantic_"):
+                        final_obs_with_metadata.setdefault(key, value)
+                final_obs_or_obs.append(final_obs_with_metadata)
             merged_final_obs = _merge_obs_dicts(final_obs_or_obs)
 
         return {

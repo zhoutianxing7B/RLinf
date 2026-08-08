@@ -15,6 +15,7 @@
 import logging
 import os
 import queue
+import shutil
 import threading
 import time
 from collections import defaultdict
@@ -27,7 +28,11 @@ from rlinf.scheduler import WorkerGroupFuncResult as Handle
 from rlinf.utils.distributed import ScopedTimer
 from rlinf.utils.logging import get_logger
 from rlinf.utils.metric_logger import MetricLogger
-from rlinf.utils.metric_utils import compute_evaluate_metrics, print_metrics_table
+from rlinf.utils.metric_utils import (
+    compute_evaluate_metrics,
+    print_metrics_table,
+    write_evaluate_trials,
+)
 from rlinf.utils.runner_utils import check_progress
 from rlinf.utils.timers import Timer
 
@@ -116,6 +121,19 @@ class EmbodiedRunner:
         self.enable_per_worker_metric_log = bool(
             self.cfg.runner.get("per_worker_log", False)
         )
+        self.save_best_only = bool(self.cfg.runner.get("save_best_only", False))
+        self.best_metric_name = str(
+            self.cfg.runner.get("best_metric", "eval/success_once")
+        )
+        self.best_metric_value = float("-inf")
+        self.best_checkpoint_dir: str | None = None
+        acceptance_cfg = self.cfg.runner.get("update_acceptance", {})
+        self.update_acceptance_enabled = bool(acceptance_cfg.get("enabled", False))
+        self.update_acceptance_min_delta = float(acceptance_cfg.get("min_delta", 0.0))
+        self.update_acceptance_max_task_drop = float(
+            acceptance_cfg.get("max_task_drop", 1.0)
+        )
+        self.accepted_eval_metrics: dict = {}
 
         # Async logging setup
         self.stop_logging = False
@@ -202,7 +220,11 @@ class EmbodiedRunner:
         env_results = env_handle.wait()
         rollout_handle.wait()
         eval_metrics_list = [results for results in env_results if results is not None]
-        eval_metrics = compute_evaluate_metrics(eval_metrics_list)
+        trial_path = f"{self.cfg.runner.logger.log_path}/eval_trials_step_{self.global_step}.jsonl"
+        write_evaluate_trials(eval_metrics_list, trial_path)
+        eval_metrics = compute_evaluate_metrics(
+            eval_metrics_list, deduplicate_trials=True
+        )
         return eval_metrics
 
     def _log_ranked_metrics(
@@ -323,8 +345,100 @@ class EmbodiedRunner:
                 eval_metrics = {f"eval/{k}": v for k, v in eval_metrics.items()}
                 self.metric_logger.log(data=eval_metrics, step=step)
 
+        best_metric_value = None
+        if self.update_acceptance_enabled:
+            if not run_val:
+                raise ValueError(
+                    "update_acceptance requires evaluation after every policy update"
+                )
+            if self.best_checkpoint_dir is None or not self.accepted_eval_metrics:
+                raise RuntimeError(
+                    "update_acceptance requires an accepted initial checkpoint"
+                )
+
+            best_metric_value = float(eval_metrics[self.best_metric_name])
+            improvement = best_metric_value - self.best_metric_value
+            task_drops = []
+            for metric_name, accepted_value in self.accepted_eval_metrics.items():
+                if not (
+                    metric_name.startswith("eval/task/")
+                    and metric_name.endswith("/success_rate")
+                ):
+                    continue
+                if metric_name in eval_metrics:
+                    task_drops.append(
+                        float(accepted_value) - float(eval_metrics[metric_name])
+                    )
+            max_task_drop = max(task_drops, default=0.0)
+            update_accepted = (
+                improvement > self.update_acceptance_min_delta
+                and max_task_drop <= self.update_acceptance_max_task_drop
+            )
+            gate_metrics = {
+                "runner/update_accepted": float(update_accepted),
+                "runner/candidate_improvement": improvement,
+                "runner/max_task_drop": max_task_drop,
+                "eval/accepted_success_once": (
+                    best_metric_value if update_accepted else self.best_metric_value
+                ),
+            }
+            eval_metrics.update(gate_metrics)
+            self.metric_logger.log(data=gate_metrics, step=step)
+
+            if update_accepted:
+                checkpoint_dir = self._save_checkpoint()
+                previous_checkpoint_dir = self.best_checkpoint_dir
+                self.best_checkpoint_dir = checkpoint_dir
+                self.best_metric_value = best_metric_value
+                self.accepted_eval_metrics = dict(eval_metrics)
+                if previous_checkpoint_dir != checkpoint_dir:
+                    shutil.rmtree(previous_checkpoint_dir)
+                    self.logger.info(
+                        "Removed superseded accepted checkpoint %s",
+                        previous_checkpoint_dir,
+                    )
+                self.logger.info(
+                    "Accepted policy update at step %d: improvement=%.6f max_task_drop=%.6f",
+                    self.global_step,
+                    improvement,
+                    max_task_drop,
+                )
+            else:
+                self.logger.info(
+                    "Rejected policy update at step %d: improvement=%.6f "
+                    "max_task_drop=%.6f; kept latest training policy; best=%s",
+                    self.global_step,
+                    improvement,
+                    max_task_drop,
+                    self.best_checkpoint_dir,
+                )
+            return eval_metrics
+
+        if self.save_best_only:
+            if run_val:
+                if self.best_metric_name not in eval_metrics:
+                    raise KeyError(
+                        f"Best metric {self.best_metric_name!r} missing from evaluation"
+                    )
+                best_metric_value = float(eval_metrics[self.best_metric_name])
+                save_model = best_metric_value > self.best_metric_value
+            else:
+                save_model = False
         if save_model:
-            self._save_checkpoint()
+            checkpoint_dir = self._save_checkpoint()
+            if self.save_best_only:
+                previous_checkpoint_dir = self.best_checkpoint_dir
+                self.best_checkpoint_dir = checkpoint_dir
+                self.best_metric_value = best_metric_value
+                if (
+                    previous_checkpoint_dir is not None
+                    and previous_checkpoint_dir != checkpoint_dir
+                ):
+                    shutil.rmtree(previous_checkpoint_dir)
+                    self.logger.info(
+                        "Removed superseded best checkpoint %s",
+                        previous_checkpoint_dir,
+                    )
 
         return eval_metrics
 
@@ -481,6 +595,36 @@ class EmbodiedRunner:
 
         start_step = self.global_step
         start_time = time.time()
+        if self.cfg.runner.get("eval_before_training", False):
+            with self.timer("initial_eval"):
+                self.update_rollout_weights()
+                initial_eval_metrics = {
+                    f"eval/{key}": value for key, value in self.evaluate().items()
+                }
+            self.metric_logger.log(data=initial_eval_metrics, step=start_step)
+            self.logger.info(
+                "Fixed pre-training evaluation at step %d: %s",
+                start_step,
+                initial_eval_metrics,
+            )
+            if self.save_best_only:
+                if self.best_metric_name not in initial_eval_metrics:
+                    raise KeyError(
+                        f"Best metric {self.best_metric_name!r} missing from initial evaluation"
+                    )
+                self.best_metric_value = float(
+                    initial_eval_metrics[self.best_metric_name]
+                )
+            if self.update_acceptance_enabled:
+                if not self.save_best_only:
+                    raise ValueError("update_acceptance requires save_best_only=true")
+                self.accepted_eval_metrics = dict(initial_eval_metrics)
+                self.best_checkpoint_dir = self._save_checkpoint()
+                self.logger.info(
+                    "Saved initial accepted checkpoint %s",
+                    self.best_checkpoint_dir,
+                )
+
         for _step in range(start_step, self.max_steps):
             # set global step
             self.actor.set_global_step(self.global_step)
@@ -641,7 +785,7 @@ class EmbodiedRunner:
 
         self._finish_run()
 
-    def _save_checkpoint(self):
+    def _save_checkpoint(self) -> str:
         self.logger.info(f"Saving checkpoint at step {self.global_step}.")
         base_output_dir = os.path.join(
             self.cfg.runner.logger.log_path,
@@ -651,6 +795,7 @@ class EmbodiedRunner:
         actor_save_path = os.path.join(base_output_dir, "actor")
         os.makedirs(actor_save_path, exist_ok=True)
         self.actor.save_checkpoint(actor_save_path, self.global_step).wait()
+        return base_output_dir
 
     def set_max_steps(self):
         self.num_steps_per_epoch = 1

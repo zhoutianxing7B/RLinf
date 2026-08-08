@@ -20,7 +20,11 @@ from rlinf.scheduler import WorkerGroupFuncResult as Handle
 from rlinf.utils.distributed import ScopedTimer
 from rlinf.utils.logging import get_logger
 from rlinf.utils.metric_logger import MetricLogger
-from rlinf.utils.metric_utils import compute_evaluate_metrics, print_metrics_table
+from rlinf.utils.metric_utils import (
+    compute_evaluate_metrics,
+    print_metrics_table,
+    write_evaluate_trials,
+)
 
 if typing.TYPE_CHECKING:
     from omegaconf.dictconfig import DictConfig
@@ -86,7 +90,11 @@ class EmbodiedEvalRunner:
             rollout_metrics = {}
 
         env_metrics_list = [results for results in env_results if results is not None]
-        eval_metrics = compute_evaluate_metrics(env_metrics_list)
+        trial_path = f"{self.cfg.runner.logger.log_path}/eval_trials.jsonl"
+        write_evaluate_trials(env_metrics_list, trial_path)
+        eval_metrics = compute_evaluate_metrics(
+            env_metrics_list, deduplicate_trials=True
+        )
         eval_metrics.update(rollout_metrics)
         return eval_metrics
 

@@ -112,6 +112,9 @@ class EnvOutput:
             obs["extra_view_images"] if "extra_view_images" in obs else None
         )
         states = obs["states"] if "states" in obs else None
+        elapsed_steps = obs.get("elapsed_steps")
+        task_ids = obs.get("task_ids")
+        trial_ids = obs.get("trial_ids")
         task_descriptions = (
             list(obs["task_descriptions"])
             if "task_descriptions" in obs and obs["task_descriptions"] is not None
@@ -124,6 +127,9 @@ class EnvOutput:
             "extra_view_images": extra_view_image_tensor,  # [N_ENV, N_IMG, H, W, C]
             "states": states,
             "task_descriptions": task_descriptions,
+            "task_ids": task_ids,
+            "trial_ids": trial_ids,
+            "elapsed_steps": elapsed_steps,
         }
 
     @staticmethod

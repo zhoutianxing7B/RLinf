@@ -324,7 +324,10 @@ class Cluster:
             Cluster._prepare_ray_code_sync_runtime_env_fragment()
         )
 
+        force_local_ray = os.environ.get("RLINF_FORCE_LOCAL_RAY", "0") == "1"
         try:
+            if force_local_ray:
+                raise ConnectionError("RLINF_FORCE_LOCAL_RAY requested")
             # First try to connect to an existing Ray cluster
             ray_init_kwargs: dict[str, Any] = {
                 "address": "auto",
@@ -347,6 +350,9 @@ class Cluster:
                 "logging_level": Cluster.LOGGING_LEVEL,
                 "namespace": Cluster.NAMESPACE,
             }
+            ray_temp_dir = os.environ.get("RLINF_RAY_TEMP_DIR")
+            if ray_temp_dir:
+                ray_init_kwargs["_temp_dir"] = ray_temp_dir
             if self._ray_code_sync_fragment is not None:
                 ray_init_kwargs["runtime_env"] = dict(self._ray_code_sync_fragment)
             ray.init(**ray_init_kwargs)

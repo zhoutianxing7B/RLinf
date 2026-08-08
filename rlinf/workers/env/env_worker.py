@@ -14,6 +14,8 @@
 
 import asyncio
 import gc
+import hashlib
+import time
 from collections import defaultdict
 from typing import Any
 
@@ -36,6 +38,10 @@ from rlinf.envs import get_env_cls
 from rlinf.envs.action_utils import prepare_actions
 from rlinf.envs.utils import get_env_attr
 from rlinf.envs.wrappers import RecordVideo
+from rlinf.models.embodiment.gr00t.gr00t_n1d7.eval_noise import (
+    eval_semantic_age_frames,
+    train_semantic_age_frame,
+)
 from rlinf.scheduler import Channel, Cluster, CommMapper, Worker
 from rlinf.utils.data_iter_utils import split_list
 from rlinf.utils.distributed import masked_stats, normalize_from_stats
@@ -54,6 +60,54 @@ from rlinf.utils.utils import (
     preprocess_embodied_batch,
 )
 from rlinf.workers.env.history_manager import HistoryManager
+
+
+def _staggered_semantic_frame(
+    max_frame: int,
+    rank: int,
+    world_size: int,
+    enabled: bool,
+    min_frame: int = 1,
+) -> int:
+    max_frame = max(1, int(max_frame))
+    min_frame = max(1, min(int(min_frame), max_frame))
+    if not enabled or world_size <= 1:
+        return max_frame
+    return min_frame + int(rank) * (max_frame - min_frame) // (int(world_size) - 1)
+
+
+def _resolve_semantic_eval_publish_frame(
+    train_publish_frame: int, eval_publish_frame: int
+) -> int:
+    eval_publish_frame = int(eval_publish_frame)
+    return int(train_publish_frame) if eval_publish_frame <= 0 else eval_publish_frame
+
+
+def _validate_semantic_publish_frame(
+    enabled: bool, publish_frame: int, execution_horizon: int
+) -> None:
+    if not enabled:
+        return
+    if not 1 <= int(publish_frame) <= int(execution_horizon):
+        raise ValueError(
+            "semantic_mid_chunk_frame must be reachable within the executed action "
+            f"chunk: publish_frame={publish_frame}, execution_horizon={execution_horizon}"
+        )
+
+
+def _observation_fingerprint(observation: dict[str, Any]) -> str:
+    digest = hashlib.sha256()
+    for key in sorted(observation):
+        value = observation[key]
+        digest.update(key.encode("utf-8"))
+        if isinstance(value, torch.Tensor):
+            tensor = value.detach().contiguous().cpu()
+            digest.update(tensor.view(torch.uint8).numpy().tobytes())
+        elif isinstance(value, np.ndarray) and value.dtype != object:
+            digest.update(np.ascontiguousarray(value).tobytes())
+        else:
+            digest.update(repr(value).encode("utf-8"))
+    return digest.hexdigest()[:16]
 
 
 class EnvWorker(Worker):
@@ -172,7 +226,103 @@ class EnvWorker(Worker):
                 torch.zeros(self.eval_num_envs_per_stage, dtype=torch.bool)
                 for _ in range(self.stage_num)
             ]
+            self._prefetch_initial_eval_reset = bool(
+                eval_env_cfg.get("prefetch_initial_reset", False)
+            )
+            self._prefetched_eval_bootstrap: list[dict[str, Any] | None] = [
+                None for _ in range(self.stage_num)
+            ]
         self.env_decoupled_mode = self.cfg.runner.get("enable_decoupled_mode", False)
+        self._semantic_env_clock: dict[tuple[str, int], dict[str, torch.Tensor]] = {}
+        rl_head_config = self.model_cfg.get("rl_head_config", {})
+        self._semantic_env_bootstrap_publish = bool(
+            rl_head_config.get("semantic_env_bootstrap_publish", False)
+        )
+        self._semantic_env_boundary_publish = bool(
+            rl_head_config.get("semantic_env_boundary_publish", False)
+        )
+        self._semantic_mid_chunk_publish = bool(
+            rl_head_config.get("semantic_mid_chunk_publish", False)
+        )
+        self._semantic_mid_chunk_frame = int(
+            rl_head_config.get("semantic_mid_chunk_frame", 8)
+        )
+        self._semantic_mid_chunk_min_frame = int(
+            rl_head_config.get("semantic_mid_chunk_min_frame", 1)
+        )
+        self._semantic_mid_chunk_frame = _staggered_semantic_frame(
+            self._semantic_mid_chunk_frame,
+            self._rank,
+            self._world_size,
+            bool(rl_head_config.get("semantic_mid_chunk_stagger_by_rank", False)),
+            min_frame=self._semantic_mid_chunk_min_frame,
+        )
+        _validate_semantic_publish_frame(
+            self._semantic_mid_chunk_publish,
+            self._semantic_mid_chunk_frame,
+            self.model_cfg.num_action_chunks,
+        )
+        self._semantic_eval_mid_chunk_frame = _resolve_semantic_eval_publish_frame(
+            self._semantic_mid_chunk_frame,
+            rl_head_config.get("semantic_eval_mid_chunk_frame", -1),
+        )
+        self._semantic_eval_random_age_min_frames = int(
+            rl_head_config.get("semantic_eval_random_age_min_frames", -1)
+        )
+        self._semantic_eval_random_age_max_frames = int(
+            rl_head_config.get("semantic_eval_random_age_max_frames", -1)
+        )
+        self._semantic_eval_random_age_seed = int(
+            rl_head_config.get("semantic_eval_random_age_seed", 2026)
+        )
+        self._semantic_train_random_age_min_frames = int(
+            rl_head_config.get("semantic_train_random_age_min_frames", -1)
+        )
+        self._semantic_train_random_age_max_frames = int(
+            rl_head_config.get("semantic_train_random_age_max_frames", -1)
+        )
+        self._semantic_train_random_age_seed = int(
+            rl_head_config.get("semantic_train_random_age_seed", 4242)
+        )
+        self._semantic_train_rollout_step = [0 for _ in range(self.stage_num)]
+        self._semantic_train_target_age = [0 for _ in range(self.stage_num)]
+        if self._semantic_train_random_age_max_frames >= 0:
+            train_semantic_age_frame(
+                0,
+                0,
+                self._semantic_train_random_age_min_frames,
+                self._semantic_train_random_age_max_frames,
+                self._semantic_train_random_age_seed,
+            )
+            if (
+                self._semantic_train_random_age_max_frames
+                >= self.model_cfg.num_action_chunks
+            ):
+                raise ValueError(
+                    "semantic_train_random_age_max_frames must be smaller than the "
+                    "executed action chunk so its source observation is publishable"
+                )
+        if self._semantic_eval_random_age_max_frames >= 0:
+            eval_semantic_age_frames(
+                torch.tensor([0]),
+                self._semantic_eval_random_age_min_frames,
+                self._semantic_eval_random_age_max_frames,
+                self._semantic_eval_random_age_seed,
+            )
+            if (
+                self._semantic_eval_random_age_max_frames
+                >= self.model_cfg.num_action_chunks
+            ):
+                raise ValueError(
+                    "semantic_eval_random_age_max_frames must be smaller than the "
+                    "executed action chunk so its source observation is publishable"
+                )
+        _validate_semantic_publish_frame(
+            self._semantic_mid_chunk_publish,
+            self._semantic_eval_mid_chunk_frame,
+            self.model_cfg.num_action_chunks,
+        )
+        self._semantic_raw_publisher = None
 
         if self.env_decoupled_mode:
             # Init the batch_router for env decoupled mode
@@ -223,6 +373,32 @@ class EnvWorker(Worker):
         )
 
         self.update_env_cfg()
+
+        if (
+            self._semantic_mid_chunk_publish
+            or self._semantic_env_bootstrap_publish
+            or self._semantic_env_boundary_publish
+        ):
+            from rlinf.models.embodiment.gr00t.gr00t_n1d7.semantic_server import (
+                Gr00tN1d7RawObservationPublisher,
+            )
+
+            rl_head_config = self.model_cfg.rl_head_config
+            semantic_port = rl_head_config.get("semantic_server_port", 6666)
+            publish_port = rl_head_config.get("semantic_server_publish_port")
+            if publish_port is None:
+                publish_port = ",".join(
+                    str(int(value.strip()) + 1)
+                    for value in str(semantic_port).split(",")
+                    if value.strip()
+                )
+            self._semantic_raw_publisher = Gr00tN1d7RawObservationPublisher(
+                host=str(rl_head_config.get("semantic_server_host", "127.0.0.1")),
+                port=publish_port,
+                timeout_ms=int(
+                    rl_head_config.get("semantic_server_timeout_ms", 120000)
+                ),
+            )
 
         if self.enable_train:
             train_env_cls = get_env_cls(self.cfg.env.train.env_type, self.cfg.env.train)
@@ -417,6 +593,53 @@ class EnvWorker(Worker):
             env_list.append(env)
         return env_list
 
+    def _reset_eval_bootstrap(self, stage_id: int) -> dict[str, Any]:
+        self.eval_env_list[stage_id].is_start = True
+        self.eval_prev_done[stage_id] = torch.zeros(
+            self.eval_num_envs_per_stage, dtype=torch.bool
+        )
+        extracted_obs, infos = self.eval_env_list[stage_id].reset()
+        if bool(self.cfg.env.eval.get("repro_diagnostics", False)):
+            self.log_info(
+                "Eval bootstrap fingerprint "
+                f"rank={self._rank} stage={stage_id} "
+                f"digest={_observation_fingerprint(dict(extracted_obs))}"
+            )
+        final_obs = infos.get("final_observation") if isinstance(infos, dict) else None
+        env_output = EnvOutput(
+            obs=extracted_obs,
+            final_obs=final_obs,
+            env_infos=infos if isinstance(infos, dict) else None,
+        )
+        return self._build_rollout_input_data(
+            env_output.to_dict(), stage_id=stage_id, mode="eval"
+        )
+
+    def _take_eval_bootstrap(self, stage_id: int) -> dict[str, Any]:
+        prefetched = self._prefetched_eval_bootstrap[stage_id]
+        if prefetched is not None:
+            self._prefetched_eval_bootstrap[stage_id] = None
+            return prefetched
+        return self._reset_eval_bootstrap(stage_id)
+
+    def _continue_eval_bootstrap(self, stage_id: int) -> dict[str, Any]:
+        """Reset onto reset-state IDs prepared at the previous eval epoch boundary."""
+        env = self.eval_env_list[stage_id]
+        self.eval_prev_done[stage_id] = torch.zeros(
+            self.eval_num_envs_per_stage, dtype=torch.bool
+        )
+        reset_state_ids = np.asarray(get_env_attr(env, "reset_state_ids")).copy()
+        extracted_obs, infos = env.reset(reset_state_ids=reset_state_ids)
+        final_obs = infos.get("final_observation") if isinstance(infos, dict) else None
+        env_output = EnvOutput(
+            obs=extracted_obs,
+            final_obs=final_obs,
+            env_infos=infos if isinstance(infos, dict) else None,
+        )
+        return self._build_rollout_input_data(
+            env_output.to_dict(), stage_id=stage_id, mode="eval"
+        )
+
     def _init_env(self):
         for i in range(self.stage_num):
             if self.enable_train:
@@ -429,6 +652,8 @@ class EnvWorker(Worker):
                 ):
                     get_env_attr(self.env_list[i], "offload")()
             if self.enable_eval:
+                if self._prefetch_initial_eval_reset:
+                    self._prefetched_eval_bootstrap[i] = self._reset_eval_bootstrap(i)
                 if self.eval_enable_offload:
                     get_env_attr(self.eval_env_list[i], "offload")()
 
@@ -456,14 +681,45 @@ class EnvWorker(Worker):
         else:
             chunk_actions = exec_actions
         env_info = {}
+        semantic_train_publish_frame = (
+            self._semantic_train_publish_frame_for_next_boundary(stage_id)
+        )
 
         obs_list, chunk_rewards, chunk_terminations, chunk_truncations, infos_list = (
-            self.env_list[stage_id].chunk_step(chunk_actions)
+            self.env_list[stage_id].chunk_step(
+                chunk_actions,
+                mid_chunk_callback=(
+                    lambda obs: (
+                        self._publish_mid_chunk_semantic(
+                            obs, stage_id=stage_id, mode="train"
+                        )
+                        if (
+                            self._semantic_mid_chunk_publish
+                            and self._semantic_raw_publisher is not None
+                        )
+                        else None
+                    )
+                ),
+                mid_chunk_frame=semantic_train_publish_frame,
+                sparse_observations=bool(
+                    self.cfg.env.train.get("sparse_chunk_observations", False)
+                )
+                and not self.use_external_reward_model
+                and not self.enable_online_lerobot,
+            )
         )
         if isinstance(obs_list, (list, tuple)):
             extracted_obs = obs_list[-1] if obs_list else None
         if isinstance(infos_list, (list, tuple)):
             infos = infos_list[-1] if infos_list else None
+        if (
+            self._semantic_env_boundary_publish
+            and self._semantic_raw_publisher is not None
+            and isinstance(extracted_obs, dict)
+        ):
+            self._publish_boundary_semantic(
+                extracted_obs, stage_id=stage_id, mode="train"
+            )
         chunk_dones = torch.logical_or(chunk_terminations, chunk_truncations)
         final_obs = (
             self._build_chunk_final_obs(obs_list, infos_list)
@@ -541,14 +797,40 @@ class EnvWorker(Worker):
             env_cfg=self.cfg.env.eval,
         )
         env_info = {}
+        semantic_eval_publish_frame = (
+            self._semantic_eval_publish_frame_for_next_boundary(stage_id)
+        )
 
         obs_list, _, chunk_terminations, chunk_truncations, infos_list = (
-            self.eval_env_list[stage_id].chunk_step(chunk_actions)
+            self.eval_env_list[stage_id].chunk_step(
+                chunk_actions,
+                mid_chunk_callback=(
+                    lambda obs: (
+                        self._publish_mid_chunk_semantic(
+                            obs, stage_id=stage_id, mode="eval"
+                        )
+                        if (
+                            self._semantic_mid_chunk_publish
+                            and self._semantic_raw_publisher is not None
+                        )
+                        else None
+                    )
+                ),
+                mid_chunk_frame=semantic_eval_publish_frame,
+            )
         )
         if isinstance(obs_list, (list, tuple)):
             extracted_obs = obs_list[-1] if obs_list else None
         if isinstance(infos_list, (list, tuple)):
             infos = infos_list[-1] if infos_list else None
+        if (
+            self._semantic_env_boundary_publish
+            and self._semantic_raw_publisher is not None
+            and isinstance(extracted_obs, dict)
+        ):
+            self._publish_boundary_semantic(
+                extracted_obs, stage_id=stage_id, mode="eval"
+            )
         chunk_dones = torch.logical_or(chunk_terminations, chunk_truncations)
         final_obs = (
             self._build_chunk_final_obs(obs_list, infos_list)
@@ -921,15 +1203,171 @@ class EnvWorker(Worker):
 
         return env_outputs
 
-    def _build_rollout_input_data(self, env_batch: dict[str, Any]) -> dict[str, Any]:
+    def _build_rollout_input_data(
+        self, env_batch: dict[str, Any], *, stage_id: int, mode: str = "train"
+    ) -> dict[str, Any]:
+        obs = dict(env_batch["obs"])
+        task_ids = obs.pop("task_ids", None)
+        trial_ids = obs.pop("trial_ids", None)
+        metadata = self._build_semantic_metadata(
+            obs, stage_id=stage_id, mode=mode, update_clock=True
+        )
+        if (
+            self._semantic_env_bootstrap_publish
+            and self._semantic_raw_publisher is not None
+            and bool(metadata["frame_ids"].eq(0).any())
+        ):
+            self._publish_semantic_observation(obs, metadata)
+        obs["__rlinf_semantic_env_ids"] = metadata["env_ids"]
+        obs["__rlinf_semantic_frame_ids"] = metadata["frame_ids"]
+        obs["__rlinf_semantic_generations"] = metadata["episode_generations"]
+        obs["__rlinf_semantic_observation_wallclock_s"] = metadata[
+            "observation_wallclock_s"
+        ]
+        if mode == "train" and self._semantic_train_random_age_max_frames >= 0:
+            obs["__rlinf_semantic_target_age_frames"] = torch.full(
+                (metadata["frame_ids"].numel(),),
+                self._semantic_train_target_age[stage_id],
+                dtype=torch.int64,
+            )
+        if task_ids is not None:
+            obs["__rlinf_task_ids"] = torch.as_tensor(task_ids, dtype=torch.int64)
+        if trial_ids is not None:
+            obs["__rlinf_trial_ids"] = torch.as_tensor(trial_ids, dtype=torch.int64)
         data = {
-            "obs": env_batch["obs"],
+            "obs": obs,
             "final_obs": env_batch["final_obs"],
         }
         if self.enable_rlt:
             data["rlt_switch_flags"] = env_batch.get("rlt_switch_flags", None)
             data["intervene_flags"] = env_batch.get("intervene_flags", None)
         return data
+
+    def _build_semantic_metadata(
+        self,
+        obs: dict[str, Any],
+        *,
+        stage_id: int,
+        mode: str,
+        update_clock: bool,
+    ) -> dict[str, torch.Tensor]:
+        batch_size = self._infer_rollout_batch_size(obs)
+        num_envs = (
+            self.train_num_envs_per_stage
+            if mode == "train"
+            else self.eval_num_envs_per_stage
+        )
+        namespace = 0 if mode == "train" else 1_000_000_000
+        base = namespace + (self._rank * self.stage_num + stage_id) * num_envs
+        env_ids = torch.arange(base, base + batch_size, dtype=torch.int64)
+
+        elapsed = obs.get("elapsed_steps")
+        if elapsed is None:
+            frame_ids = torch.zeros(batch_size, dtype=torch.int64)
+        else:
+            frame_ids = torch.as_tensor(elapsed).reshape(-1).to(dtype=torch.int64).cpu()
+        clock_key = (mode, stage_id)
+        clock = self._semantic_env_clock.get(clock_key)
+        if clock is None or clock["frame_ids"].numel() != batch_size:
+            generations = torch.zeros(batch_size, dtype=torch.int64)
+        else:
+            generations = clock["generations"].clone()
+            generations[frame_ids < clock["frame_ids"]] += 1
+        if update_clock:
+            self._semantic_env_clock[clock_key] = {
+                "frame_ids": frame_ids.clone(),
+                "generations": generations.clone(),
+            }
+        return {
+            "env_ids": env_ids,
+            "frame_ids": frame_ids,
+            "episode_generations": generations,
+            "observation_wallclock_s": torch.full(
+                (batch_size,), time.time(), dtype=torch.float64
+            ),
+        }
+
+    def _publish_semantic_observation(
+        self, obs: dict[str, Any], metadata: dict[str, torch.Tensor]
+    ) -> None:
+        publisher = self._semantic_raw_publisher
+        if publisher is None:
+            return
+        publisher.poll()
+        raw_observation = {
+            key: obs[key]
+            for key in ("states", "main_images", "wrist_images", "task_descriptions")
+        }
+        publish_metadata = {
+            "env_ids": metadata["env_ids"].tolist(),
+            "frame_ids": metadata["frame_ids"].tolist(),
+            "episode_generations": metadata["episode_generations"].tolist(),
+            "observation_wallclock_s": metadata["observation_wallclock_s"].tolist(),
+        }
+        if "semantic_priority" in metadata:
+            publish_metadata["semantic_priority"] = int(metadata["semantic_priority"])
+        publisher.publish(raw_observation, publish_metadata)
+
+    def _publish_mid_chunk_semantic(
+        self, obs: dict[str, Any], *, stage_id: int, mode: str
+    ) -> None:
+        metadata = self._build_semantic_metadata(
+            obs, stage_id=stage_id, mode=mode, update_clock=False
+        )
+        metadata["semantic_priority"] = 1
+        self._publish_semantic_observation(obs, metadata)
+
+    def _publish_boundary_semantic(
+        self, obs: dict[str, Any], *, stage_id: int, mode: str
+    ) -> None:
+        metadata = self._build_semantic_metadata(
+            obs, stage_id=stage_id, mode=mode, update_clock=False
+        )
+        metadata["semantic_priority"] = 1
+        self._publish_semantic_observation(obs, metadata)
+
+    def _semantic_eval_publish_frame_for_next_boundary(self, stage_id: int) -> int:
+        random_max = self._semantic_eval_random_age_max_frames
+        if random_max < 0:
+            return self._semantic_eval_mid_chunk_frame
+        clock = self._semantic_env_clock.get(("eval", stage_id))
+        if clock is None:
+            current_frames = torch.zeros(
+                self.eval_num_envs_per_stage, dtype=torch.int64
+            )
+        else:
+            current_frames = clock["frame_ids"]
+        next_frames = current_frames + int(self.model_cfg.num_action_chunks)
+        ages = eval_semantic_age_frames(
+            next_frames,
+            self._semantic_eval_random_age_min_frames,
+            random_max,
+            self._semantic_eval_random_age_seed,
+        )
+        publish_frames = {int(self.model_cfg.num_action_chunks) - age for age in ages}
+        if len(publish_frames) != 1:
+            raise RuntimeError(
+                "Random-age evaluation requires synchronized simulator frames within "
+                f"an env batch, got next_frames={next_frames.tolist()} ages={ages}"
+            )
+        return publish_frames.pop()
+
+    def _semantic_train_publish_frame_for_next_boundary(self, stage_id: int) -> int:
+        random_max = self._semantic_train_random_age_max_frames
+        if random_max < 0:
+            return self._semantic_mid_chunk_frame
+        rollout_step = self._semantic_train_rollout_step[stage_id]
+        stream_id = self._rank * self.stage_num + stage_id
+        age = train_semantic_age_frame(
+            rollout_step,
+            stream_id,
+            self._semantic_train_random_age_min_frames,
+            random_max,
+            self._semantic_train_random_age_seed,
+        )
+        self._semantic_train_rollout_step[stage_id] += 1
+        self._semantic_train_target_age[stage_id] = age
+        return int(self.model_cfg.num_action_chunks) - age
 
     def _send_train_bootstrap(
         self, rollout_channel: Channel, env_outputs: list[EnvOutput]
@@ -940,7 +1378,9 @@ class EnvWorker(Worker):
             self.send_to(
                 group_name=self.cfg.rollout.group_name,
                 channel=rollout_channel,
-                data=self._build_rollout_input_data(env_batch),
+                data=self._build_rollout_input_data(
+                    env_batch, stage_id=stage_id, mode="train"
+                ),
                 mode="train",
                 tag="rollout_results",
                 route_key=stage_id if not self.env_decoupled_mode else None,
@@ -1127,7 +1567,9 @@ class EnvWorker(Worker):
                     self.send_to(
                         group_name=self.cfg.rollout.group_name,
                         channel=rollout_channel,
-                        data=self._build_rollout_input_data(env_batch),
+                        data=self._build_rollout_input_data(
+                            env_batch, stage_id=stage_id, mode="train"
+                        ),
                         mode="train",
                         tag="rollout_results",
                         route_key=stage_id if not self.env_decoupled_mode else None,
@@ -1284,25 +1726,14 @@ class EnvWorker(Worker):
         for eval_rollout_epoch in range(self.eval_rollout_epoch):
             if not self.cfg.env.eval.auto_reset or eval_rollout_epoch == 0:
                 for stage_id in range(self.stage_num):
-                    self.eval_env_list[stage_id].is_start = True
-                    self.eval_prev_done[stage_id] = torch.zeros(
-                        self.eval_num_envs_per_stage, dtype=torch.bool
-                    )
-                    extracted_obs, infos = self.eval_env_list[stage_id].reset()
-                    env_output = EnvOutput(
-                        obs=extracted_obs,
-                        final_obs=(
-                            infos["final_observation"]
-                            if "final_observation" in infos
-                            else None
-                        ),
-                        env_infos=infos if isinstance(infos, dict) else None,
-                    )
-                    env_batch = env_output.to_dict()
+                    if eval_rollout_epoch == 0:
+                        bootstrap = self._take_eval_bootstrap(stage_id)
+                    else:
+                        bootstrap = self._continue_eval_bootstrap(stage_id)
                     self.send_to(
                         group_name=self.cfg.rollout.group_name,
                         channel=rollout_channel,
-                        data=self._build_rollout_input_data(env_batch),
+                        data=bootstrap,
                         mode="eval",
                         tag="rollout_results",
                         route_key=stage_id if not self.env_decoupled_mode else None,
@@ -1351,7 +1782,9 @@ class EnvWorker(Worker):
                     self.send_to(
                         group_name=self.cfg.rollout.group_name,
                         channel=rollout_channel,
-                        data=self._build_rollout_input_data(env_batch),
+                        data=self._build_rollout_input_data(
+                            env_batch, stage_id=stage_id, mode="eval"
+                        ),
                         mode="eval",
                         tag="rollout_results",
                         route_key=stage_id if not self.env_decoupled_mode else None,
@@ -1449,9 +1882,7 @@ class EnvWorker(Worker):
         if max_train_samples is not None:
             actor_world_size = self._component_placement.get_world_size("actor")
             source_count = len(self.pipeline_actor_env_ranks[actor_rank])
-            per_micro_batch_group = (
-                actor_world_size * self.cfg.actor.micro_batch_size
-            )
+            per_micro_batch_group = actor_world_size * self.cfg.actor.micro_batch_size
             if int(max_train_samples) % per_micro_batch_group != 0:
                 raise ValueError(
                     "max_train_samples_per_rollout must be divisible by "
@@ -1459,9 +1890,7 @@ class EnvWorker(Worker):
                     f"got {max_train_samples=}, {actor_world_size=}, "
                     f"micro_batch_size={self.cfg.actor.micro_batch_size}."
                 )
-            target_micro_batches = (
-                int(max_train_samples) // per_micro_batch_group
-            )
+            target_micro_batches = int(max_train_samples) // per_micro_batch_group
             if target_micro_batches % source_count != 0:
                 raise ValueError(
                     "max_train_samples_per_rollout must allocate an equal number "
@@ -1470,9 +1899,7 @@ class EnvWorker(Worker):
                 )
             local_target = target_micro_batches // source_count
             if local_target < len(micro_batches):
-                selected = evenly_spaced_indices(
-                    len(micro_batches), local_target
-                )
+                selected = evenly_spaced_indices(len(micro_batches), local_target)
                 micro_batches = [micro_batches[index] for index in selected]
         return [pack_batch(micro_batch) for micro_batch in micro_batches]
 

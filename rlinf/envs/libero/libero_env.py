@@ -135,6 +135,7 @@ class LiberoEnv(gym.Env):
         self._generator = np.random.default_rng(seed=self.seed)
         self._generator_ordered = np.random.default_rng(seed=0)
         self.start_idx = 0
+        self._train_trial_assignment_round = 0
 
         self.task_suite: Benchmark = get_benchmark_overridden(cfg.task_suite_name)()
 
@@ -457,11 +458,126 @@ class LiberoEnv(gym.Env):
             self._valid_reset_state_ids = None
 
     def update_reset_state_ids(self):
-        if self.is_eval or self.cfg.use_ordered_reset_state_ids:
+        balance_task_assignment = not self.is_eval and bool(
+            self.cfg.get("balance_train_task_assignment", False)
+        )
+        preserve_task_assignment = (
+            not self.is_eval
+            and bool(self.cfg.get("preserve_train_task_assignment", False))
+            and hasattr(self, "task_ids")
+        )
+        if balance_task_assignment:
+            group_env_idx = np.arange(0, self.num_envs, self.group_size)
+            reset_state_ids = self._get_assigned_train_reset_state_ids(group_env_idx)
+        elif preserve_task_assignment:
+            # Keep each simulator on its current task and vary only the trial.
+            # Rebuilding a LIBERO MuJoCo environment is much more expensive than
+            # applying another initial state for the same task.
+            group_task_ids = self.task_ids[:: self.group_size]
+            reset_state_ids = np.asarray(
+                [
+                    self._generator.integers(
+                        self.cumsum_trial_id_bins[task_id - 1] if task_id > 0 else 0,
+                        self.cumsum_trial_id_bins[task_id],
+                    )
+                    for task_id in group_task_ids
+                ],
+                dtype=np.int64,
+            )
+        elif self.is_eval or self.cfg.use_ordered_reset_state_ids:
             reset_state_ids = self._get_ordered_reset_state_ids(self.num_group)
         else:
             reset_state_ids = self._get_random_reset_state_ids(self.num_group)
+        if self.is_eval and np.any(reset_state_ids < 0):
+            # Evaluation pools need not be divisible by the number of simulators.
+            # Keep excess simulators valid by replaying deterministic pool entries;
+            # _eval_seen_trials excludes these fallback episodes from metrics.
+            if len(self._eval_reset_pool) == 0:
+                raise RuntimeError("evaluation reset pool is empty")
+            exhausted = np.flatnonzero(reset_state_ids < 0)
+            reset_state_ids[exhausted] = np.resize(
+                self._eval_reset_pool, len(exhausted)
+            )
         self.reset_state_ids = reset_state_ids.repeat(self.group_size)
+
+    def _get_balanced_train_task_ids(self, env_idx):
+        """Assign tasks round-robin over global grouped simulator ids."""
+        if self.is_eval:
+            raise ValueError(
+                "Balanced train task assignment is unavailable in eval mode."
+            )
+        valid_task_ids = (
+            np.asarray(sorted(set(self.task_id_filter)), dtype=np.int64)
+            if self.task_id_filter is not None
+            else np.arange(len(self.trial_id_bins), dtype=np.int64)
+        )
+        if len(valid_task_ids) == 0:
+            raise ValueError(
+                "Balanced train task assignment requires at least one task."
+            )
+        env_idx = np.asarray(env_idx, dtype=np.int64)
+        local_group_ids = env_idx // self.group_size
+        global_group_ids = self.seed_offset * self.num_group + local_group_ids
+        return valid_task_ids[global_group_ids % len(valid_task_ids)]
+
+    def _get_assigned_train_reset_state_ids(self, env_idx):
+        env_idx = np.asarray(env_idx, dtype=np.int64)
+        if bool(self.cfg.get("unique_train_trial_assignment", False)):
+            return self._get_unique_assigned_train_reset_state_ids(env_idx)
+        if hasattr(self, "task_ids"):
+            task_ids = self.task_ids[env_idx]
+        else:
+            task_ids = self._get_balanced_train_task_ids(env_idx)
+        return np.asarray(
+            [
+                self._generator.integers(
+                    self.cumsum_trial_id_bins[task_id - 1] if task_id > 0 else 0,
+                    self.cumsum_trial_id_bins[task_id],
+                )
+                for task_id in task_ids
+            ],
+            dtype=np.int64,
+        )
+
+    def _get_unique_assigned_train_reset_state_ids(self, env_idx):
+        """Assign balanced training trials without replacement across env ranks."""
+        if hasattr(self, "task_ids"):
+            task_ids = self.task_ids[env_idx]
+        else:
+            task_ids = self._get_balanced_train_task_ids(env_idx)
+
+        valid_task_ids = (
+            np.asarray(sorted(set(self.task_id_filter)), dtype=np.int64)
+            if self.task_id_filter is not None
+            else np.arange(len(self.trial_id_bins), dtype=np.int64)
+        )
+        num_tasks = len(valid_task_ids)
+        local_group_ids = env_idx // self.group_size
+        global_group_ids = self.seed_offset * self.num_group + local_group_ids
+        assignment_round = int(getattr(self, "_train_trial_assignment_round", 0))
+        base_seed = int(self.cfg.get("seed", 0))
+        task_permutations = {}
+        reset_state_ids = []
+
+        for global_group_id, task_id in zip(global_group_ids, task_ids):
+            task_id = int(task_id)
+            num_trials = int(self.trial_id_bins[task_id])
+            if task_id not in task_permutations:
+                permutation_seed = (
+                    base_seed + 1_000_003 * assignment_round + 9_176 * task_id
+                )
+                task_permutations[task_id] = np.random.default_rng(
+                    permutation_seed
+                ).permutation(num_trials)
+            task_occurrence = int(global_group_id) // num_tasks
+            trial_id = int(task_permutations[task_id][task_occurrence % num_trials])
+            task_start = (
+                int(self.cumsum_trial_id_bins[task_id - 1]) if task_id > 0 else 0
+            )
+            reset_state_ids.append(task_start + trial_id)
+
+        self._train_trial_assignment_round = assignment_round + 1
+        return np.asarray(reset_state_ids, dtype=np.int64)
 
     def _init_task_and_trial_ids(self):
         self.task_ids, self.trial_ids = (
@@ -566,6 +682,21 @@ class LiberoEnv(gym.Env):
         ]
         return init_state
 
+    def _next_simulator_reset_seed(self, num_reset_envs: int) -> int:
+        if self.is_eval or not bool(
+            self.cfg.get("randomize_train_sim_seed_on_reset", False)
+        ):
+            return int(self.seed * num_reset_envs)
+
+        low = int(self.cfg.get("train_sim_seed_low", 0))
+        high = int(self.cfg.get("train_sim_seed_high", np.iinfo(np.int32).max))
+        if low < 0 or high <= low:
+            raise ValueError(
+                "train simulator seed range must satisfy 0 <= low < high, got "
+                f"low={low}, high={high}"
+            )
+        return int(self._generator.integers(low=low, high=high))
+
     @property
     def elapsed_steps(self):
         return self._elapsed_steps
@@ -620,6 +751,8 @@ class LiberoEnv(gym.Env):
             ]
 
         self.success_once = self.success_once | terminations
+        episode_info["task_id"] = self.task_ids.copy()
+        episode_info["trial_id"] = self.trial_ids.copy()
         episode_info["success_once"] = self.success_once.copy()
         episode_info["return"] = self.returns.copy()
         episode_info["episode_len"] = self.elapsed_steps.copy()
@@ -671,6 +804,9 @@ class LiberoEnv(gym.Env):
             "wrist_images": wrist_image_tensor,
             "states": states,
             "task_descriptions": self.task_descriptions,
+            "elapsed_steps": torch.as_tensor(self.elapsed_steps.copy()),
+            "task_ids": torch.as_tensor(self.task_ids.copy()),
+            "trial_ids": torch.as_tensor(self.trial_ids.copy()),
         }
         return obs
 
@@ -683,12 +819,15 @@ class LiberoEnv(gym.Env):
             task_changed = self.task_ids[env_id] != task_ids[j]
             self.task_ids[env_id] = task_ids[j]
             self.trial_ids[env_id] = trial_ids[j]
-            if task_changed or not self.is_eval:
+            preserve_task_assignment = bool(
+                self.cfg.get("preserve_train_task_assignment", False)
+            )
+            if task_changed or (not self.is_eval and not preserve_task_assignment):
                 reconfig_env_idx.append(env_id)
         if reconfig_env_idx:
             env_fn_params = self.get_env_fn_params(reconfig_env_idx)
             self.env.reconfigure_env_fns(env_fn_params, reconfig_env_idx)
-        self.env.seed(self.seed * len(env_idx))
+        self.env.seed(self._next_simulator_reset_seed(len(env_idx)))
         self.env.reset(id=env_idx)
         variant = os.environ.get(
             "LIBERO_TYPE",
@@ -717,13 +856,24 @@ class LiberoEnv(gym.Env):
                 self._eval_reset_pool = pool[pool >= 0].copy()
                 self.update_reset_state_ids()
             reset_state_ids = (
-                self.reset_state_ids if self.use_fixed_reset_state_ids else None
+                self.reset_state_ids
+                if self.use_fixed_reset_state_ids
+                or (
+                    not self.is_eval
+                    and bool(self.cfg.get("balance_train_task_assignment", False))
+                )
+                else None
             )
             self._is_start = False
 
         if reset_state_ids is None:
-            num_reset_states = len(env_idx)
-            reset_state_ids = self._get_random_reset_state_ids(num_reset_states)
+            if not self.is_eval and bool(
+                self.cfg.get("balance_train_task_assignment", False)
+            ):
+                reset_state_ids = self._get_assigned_train_reset_state_ids(env_idx)
+            else:
+                num_reset_states = len(env_idx)
+                reset_state_ids = self._get_random_reset_state_ids(num_reset_states)
 
         self._reconfigure(reset_state_ids, env_idx)
         for _ in range(15):
@@ -738,12 +888,12 @@ class LiberoEnv(gym.Env):
         for i, idx in enumerate(env_idx):
             self.current_raw_obs[idx] = raw_obs[i]
 
-        obs = self._wrap_obs(self.current_raw_obs)
         self._reset_metrics(env_idx)
+        obs = self._wrap_obs(self.current_raw_obs)
         infos = {}
         return obs, infos
 
-    def step(self, actions=None, auto_reset=True):
+    def step(self, actions=None, auto_reset=True, wrap_observation=True):
         """Step the environment with the given actions."""
         if isinstance(actions, torch.Tensor):
             actions = actions.detach().cpu().numpy()
@@ -753,7 +903,7 @@ class LiberoEnv(gym.Env):
         self.current_raw_obs = raw_obs
         infos = list_of_dict_to_dict_of_list(info_lists)
         truncations = self.elapsed_steps >= self.cfg.max_episode_steps
-        obs = self._wrap_obs(raw_obs)
+        obs = self._wrap_obs(raw_obs) if wrap_observation else None
 
         step_reward = self._calc_step_reward(terminations)
 
@@ -774,7 +924,14 @@ class LiberoEnv(gym.Env):
             infos,
         )
 
-    def chunk_step(self, chunk_actions):
+    def chunk_step(
+        self,
+        chunk_actions,
+        *,
+        mid_chunk_callback=None,
+        mid_chunk_frame: int | None = None,
+        sparse_observations: bool = False,
+    ):
         # chunk_actions: [num_envs, chunk_step, action_dim]
         chunk_size = chunk_actions.shape[1]
         obs_list = []
@@ -786,8 +943,19 @@ class LiberoEnv(gym.Env):
         raw_chunk_truncations = []
         for i in range(chunk_size):
             actions = chunk_actions[:, i]
+            wrap_observation = (
+                not sparse_observations
+                or i + 1 == chunk_size
+                or (
+                    mid_chunk_callback is not None
+                    and mid_chunk_frame is not None
+                    and i + 1 == int(mid_chunk_frame)
+                )
+            )
             extracted_obs, step_reward, terminations, truncations, infos = self.step(
-                actions, auto_reset=False
+                actions,
+                auto_reset=False,
+                wrap_observation=wrap_observation,
             )
             obs_list.append(extracted_obs)
             infos_list.append(infos)
@@ -795,6 +963,13 @@ class LiberoEnv(gym.Env):
             chunk_rewards.append(step_reward)
             raw_chunk_terminations.append(terminations)
             raw_chunk_truncations.append(truncations)
+
+            if (
+                mid_chunk_callback is not None
+                and mid_chunk_frame is not None
+                and i + 1 == int(mid_chunk_frame)
+            ):
+                mid_chunk_callback(extracted_obs)
 
         chunk_rewards = torch.stack(chunk_rewards, dim=1)  # [num_envs, chunk_steps]
         raw_chunk_terminations = torch.stack(
@@ -864,12 +1039,16 @@ class LiberoEnv(gym.Env):
 
         new_reset_state_ids = self._get_ordered_reset_state_ids(len(env_idx))
         valid_mask = new_reset_state_ids >= 0
-        env_to_reset = env_idx[valid_mask]
-        if len(env_to_reset) > 0:
-            self.reset_state_ids[env_to_reset] = new_reset_state_ids[valid_mask]
+        if len(env_idx) > 0:
+            # A fixed-horizon eval can outlive the finite reset-state pool. Keep
+            # exhausted simulators alive by replaying their previous state;
+            # _eval_seen_trials prevents those fallback episodes from being counted.
+            replacement_reset_state_ids = self.reset_state_ids[env_idx].copy()
+            replacement_reset_state_ids[valid_mask] = new_reset_state_ids[valid_mask]
+            self.reset_state_ids[env_idx] = replacement_reset_state_ids
             obs, infos = self.reset(
-                env_idx=env_to_reset,
-                reset_state_ids=self.reset_state_ids[env_to_reset],
+                env_idx=env_idx,
+                reset_state_ids=replacement_reset_state_ids,
             )
         else:
             obs = _final_obs

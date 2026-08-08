@@ -302,7 +302,10 @@ class FSDPModelManager:
             model=module, device_mesh=self._device_mesh
         )
         self.optimizer = self.build_optimizer(
-            model=self.model, enable_critic_warmup=self.critic_warmup_steps > 0
+            model=self.model,
+            enable_critic_warmup=(
+                self.critic_warmup_steps > 0
+            ),
         )
 
         self.lr_scheduler = self.build_lr_scheduler(
@@ -461,6 +464,10 @@ class FSDPModelManager:
             lr_list = [group["lr"] for group in self.optimizer.param_groups]
 
         return grad_norm, lr_list
+
+    def is_critic_warmup_active(self) -> bool:
+        """Return whether the native optimizer is still in critic warmup."""
+        return self.optimizer_steps < self.critic_warmup_steps
 
     def build_lr_scheduler(
         self, optimizer: Optimizer, optim_config: DictConfig, last_epoch: int = -1

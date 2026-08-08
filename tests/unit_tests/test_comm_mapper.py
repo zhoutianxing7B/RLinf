@@ -25,6 +25,25 @@ from rlinf.scheduler import (
 from rlinf.workers.rollout.hf.huggingface_worker import MultiStepRolloutWorker
 
 
+def test_env_output_preserves_rollout_identity_fields():
+    task_ids = torch.tensor([0, 9])
+    trial_ids = torch.tensor([3, 4])
+    elapsed_steps = torch.tensor([8, 12])
+
+    output = EnvOutput(
+        obs={
+            "states": torch.zeros(2, 4),
+            "task_ids": task_ids,
+            "trial_ids": trial_ids,
+            "elapsed_steps": elapsed_steps,
+        }
+    ).to_dict()
+
+    torch.testing.assert_close(output["obs"]["task_ids"], task_ids)
+    torch.testing.assert_close(output["obs"]["trial_ids"], trial_ids)
+    torch.testing.assert_close(output["obs"]["elapsed_steps"], elapsed_steps)
+
+
 def _make_obs(start: int, batch_size: int) -> dict:
     return {
         "states": torch.arange(start, start + batch_size * 2, dtype=torch.float32).view(

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import os
 import uuid
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -33,6 +34,9 @@ if TYPE_CHECKING:
     from .channel_worker import ChannelWorker, LocalChannel
 
 DEFAULT_KEY = "default_queue"
+FORCE_SYNC_CHANNEL_TRANSPORT = (
+    os.environ.get("RLINF_FORCE_SYNC_CHANNEL_TRANSPORT", "0") == "1"
+)
 
 
 class Channel:
@@ -401,7 +405,7 @@ class Channel:
                 item,
                 self._channel_name,
                 target_rank,
-                async_op=True,
+                async_op=async_op or not FORCE_SYNC_CHANNEL_TRANSPORT,
                 piggyback_payload=(key, weight),
             )
 
@@ -457,7 +461,7 @@ class Channel:
                 item,
                 self._channel_name,
                 target_rank,
-                async_op=True,
+                async_op=not FORCE_SYNC_CHANNEL_TRANSPORT,
                 piggyback_payload=(key, weight),
             )
             try:
@@ -497,8 +501,12 @@ class Channel:
                 "dst_addr": self._current_worker.worker_address,
                 "query_id": query_id,
                 "key": key,
+                "sync_transport": FORCE_SYNC_CHANNEL_TRANSPORT and not async_op,
             }
             target_actor.get.remote(**get_kwargs)
+            if FORCE_SYNC_CHANNEL_TRANSPORT and not async_op:
+                data, _ = self._current_worker.recv(self._channel_name, target_rank)
+                return data
             async_comm_work = self._current_worker.recv(
                 self._channel_name, target_rank, async_op=True
             )
@@ -550,6 +558,7 @@ class Channel:
                 "query_id": query_id,
                 "key": key,
                 "nowait": True,
+                "sync_transport": FORCE_SYNC_CHANNEL_TRANSPORT,
             }
             target_actor.get.remote(**get_kwargs)
             data, query_id = self._current_worker.recv(self._channel_name, target_rank)
@@ -594,8 +603,12 @@ class Channel:
                 "query_id": query_id,
                 "target_weight": target_weight,
                 "key": key,
+                "sync_transport": FORCE_SYNC_CHANNEL_TRANSPORT and not async_op,
             }
             target_actor.get_batch.remote(**get_kwargs)
+            if FORCE_SYNC_CHANNEL_TRANSPORT and not async_op:
+                data, _ = self._current_worker.recv(self._channel_name, target_rank)
+                return data
             async_comm_work = self._current_worker.recv(
                 self._channel_name, target_rank, async_op=True
             )

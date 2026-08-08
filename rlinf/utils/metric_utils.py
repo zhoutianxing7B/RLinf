@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import math
 import os
 import time
@@ -303,7 +304,7 @@ def count_trajectories(metrics_dict):
         raise TypeError(f"Unsupported tensor type: {type(first_tensor)}")
 
 
-def compute_evaluate_metrics(eval_metrics_list):
+def compute_evaluate_metrics(eval_metrics_list, *, deduplicate_trials: bool = False):
     """
     List of evaluate metrics, list length stands for rollout process
 
@@ -333,19 +334,131 @@ def compute_evaluate_metrics(eval_metrics_list):
         if metric:
             all_eval_metrics[env_info_key] = metric
 
+    task_ids = None
+    trial_ids = None
+    task_success = None
+    unique_trial_indices = None
+    raw_trajectory_count = sum(trajectory_counts)
+    if "task_id" in all_eval_metrics and "success_once" in all_eval_metrics:
+        task_ids = torch.concat(
+            [_normalize_metric_shard(s) for s in all_eval_metrics["task_id"]]
+        ).to(torch.int64)
+        task_success = torch.concat(
+            [_normalize_metric_shard(s) for s in all_eval_metrics["success_once"]]
+        )
+        if task_ids.numel() != task_success.numel():
+            raise ValueError(
+                "task_id and success_once must contain the same number of episodes"
+            )
+        if "trial_id" in all_eval_metrics:
+            trial_ids = torch.concat(
+                [_normalize_metric_shard(s) for s in all_eval_metrics["trial_id"]]
+            ).to(torch.int64)
+            if task_ids.numel() != trial_ids.numel():
+                raise ValueError(
+                    "task_id and trial_id must contain the same number of episodes"
+                )
+
+            if deduplicate_trials:
+                seen_trials: set[tuple[int, int]] = set()
+                unique_indices = []
+                for index, (task_id, trial_id) in enumerate(
+                    zip(task_ids.tolist(), trial_ids.tolist(), strict=True)
+                ):
+                    trial_key = (task_id, trial_id)
+                    if trial_key in seen_trials:
+                        continue
+                    seen_trials.add(trial_key)
+                    unique_indices.append(index)
+                unique_trial_indices = torch.as_tensor(
+                    unique_indices, dtype=torch.int64
+                )
+                task_ids = task_ids[unique_trial_indices]
+                trial_ids = trial_ids[unique_trial_indices]
+                task_success = task_success[unique_trial_indices]
+
     for key in all_eval_metrics:
         shards = [_normalize_metric_shard(s) for s in all_eval_metrics[key]]
         stacked = torch.concat(shards).float()
+        if unique_trial_indices is not None and stacked.numel() == raw_trajectory_count:
+            stacked = stacked[unique_trial_indices]
         all_eval_metrics[key] = (
             stacked.mean().detach().cpu().numpy()
             if stacked.numel() > 0
             else np.asarray(0.0, dtype=np.float64)
         )
 
-    # Add total trajectory count to metrics
-    all_eval_metrics["num_trajectories"] = sum(trajectory_counts)
+    if task_ids is not None and task_success is not None:
+        for task_id in torch.unique(task_ids, sorted=True).tolist():
+            task_mask = task_ids == task_id
+            task_count = int(task_mask.sum().item())
+            all_eval_metrics[f"task/{task_id}/success_rate"] = (
+                task_success[task_mask].float().mean().item()
+            )
+            all_eval_metrics[f"task/{task_id}/num_trajectories"] = task_count
+        if trial_ids is not None:
+            task_trials = torch.stack((task_ids, trial_ids), dim=1)
+            unique_task_trials = int(torch.unique(task_trials, dim=0).shape[0])
+            all_eval_metrics["unique_task_trials"] = unique_task_trials
+            all_eval_metrics["duplicate_task_trials"] = int(
+                raw_trajectory_count - unique_task_trials
+            )
+
+    all_eval_metrics["raw_num_trajectories"] = raw_trajectory_count
+    all_eval_metrics["num_trajectories"] = (
+        int(task_ids.numel())
+        if unique_trial_indices is not None
+        else raw_trajectory_count
+    )
 
     return all_eval_metrics
+
+
+def write_evaluate_trials(eval_metrics_list, output_path: str) -> int:
+    """Persist one success outcome per unique LIBERO task/reset-state pair."""
+    required_keys = ("task_id", "trial_id", "success_once")
+    tensors = {}
+    for key in required_keys:
+        shards = [
+            _normalize_metric_shard(metrics[key])
+            for metrics in eval_metrics_list
+            if key in metrics
+        ]
+        if not shards:
+            return 0
+        tensors[key] = torch.concat(shards)
+
+    num_rows = tensors["task_id"].numel()
+    if any(tensor.numel() != num_rows for tensor in tensors.values()):
+        raise ValueError("task_id, trial_id, and success_once must have equal lengths")
+
+    seen_trials: set[tuple[int, int]] = set()
+    rows = []
+    for task_id, trial_id, success in zip(
+        tensors["task_id"].tolist(),
+        tensors["trial_id"].tolist(),
+        tensors["success_once"].tolist(),
+        strict=True,
+    ):
+        trial_key = (int(task_id), int(trial_id))
+        if trial_key in seen_trials:
+            continue
+        seen_trials.add(trial_key)
+        rows.append(
+            {
+                "task_id": trial_key[0],
+                "trial_id": trial_key[1],
+                "success": bool(success),
+            }
+        )
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    tmp_path = f"{output_path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as output_file:
+        for row in rows:
+            output_file.write(json.dumps(row, sort_keys=True) + "\n")
+    os.replace(tmp_path, output_path)
+    return len(rows)
 
 
 def compute_rollout_metrics(data_buffer: dict) -> dict:

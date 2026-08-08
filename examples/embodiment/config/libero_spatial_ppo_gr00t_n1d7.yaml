@@ -109,9 +109,20 @@ rollout:
   pipeline_stage_num: 1
 
   model:
+    model_type: ${actor.model.model_type}
+    trust_remote_code: ${actor.model.trust_remote_code}
+    is_lora: ${actor.model.is_lora}
+    action_dim: ${actor.model.action_dim}
+    obs_converter_type: ${actor.model.obs_converter_type}
+    embodiment_tag: ${actor.model.embodiment_tag}
+    add_value_head: ${actor.model.add_value_head}
     model_path: /path/to/GR00T-N1.7-LIBERO/libero_spatial
     backbone_model_path: /path/to/Cosmos-Reason2-2B
     precision: ${actor.model.precision}
+    num_action_chunks: ${actor.model.num_action_chunks}
+    denoising_steps: ${actor.model.denoising_steps}
+    num_steps: ${actor.model.num_steps}
+    rl_head_config: ${actor.model.rl_head_config}
 
 actor:
   group_name: "ActorGroup"

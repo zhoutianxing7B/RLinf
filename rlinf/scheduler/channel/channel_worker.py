@@ -403,6 +403,7 @@ class ChannelWorker(Worker):
         query_id: int,
         key: Any = DEFAULT_KEY,
         nowait: bool = False,
+        sync_transport: bool = False,
     ) -> Any:
         """Get an item from the channel queue.
 
@@ -412,6 +413,7 @@ class ChannelWorker(Worker):
             key (Any): The key to get the item from. A unique identifier for a specific set of items.
             When a key is given, the channel will look for the item in the queue associated with that key.
             nowait (bool): If True, directly raise asyncio.QueueEmpty if the queue is empty. Defaults to False.
+            sync_transport (bool): Use blocking transport for this response.
 
         """
         self.create_queue(key, self.maxsize())
@@ -427,7 +429,7 @@ class ChannelWorker(Worker):
             weighted_item.item,
             dst_addr.root_group_name,
             dst_addr.rank_path,
-            async_op=True,
+            async_op=not sync_transport,
             piggyback_payload=query_id,
         )
 
@@ -453,6 +455,7 @@ class ChannelWorker(Worker):
         query_id: int,
         target_weight: int,
         key: str = DEFAULT_KEY,
+        sync_transport: bool = False,
     ) -> list[Any]:
         """Get a batch of items from the channel queue based on the batch weight.
 
@@ -462,6 +465,7 @@ class ChannelWorker(Worker):
             target_weight (int): The target weight for the batch. The batch will contain items until the total weight reaches this value.
             key (Any): The key to get the item from. A unique identifier for a specific set of items.
             When a key is given, the channel will look for the item in the queue associated with that key.
+            sync_transport (bool): Use blocking transport for this response.
 
         """
         self.create_queue(key, self.maxsize())
@@ -481,7 +485,7 @@ class ChannelWorker(Worker):
             batch,
             dst_addr.root_group_name,
             dst_addr.rank_path,
-            async_op=True,
+            async_op=not sync_transport,
             piggyback_payload=query_id,
         )
 

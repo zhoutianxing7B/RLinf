@@ -21,6 +21,38 @@ from rlinf.algorithms.utils import kl_penalty, safe_normalize
 from rlinf.utils.utils import masked_mean
 
 
+def normalize_advantages_by_group(
+    advantages: torch.Tensor,
+    group_ids: torch.Tensor,
+    loss_mask: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Whiten advantages independently for each group using valid entries only."""
+    if loss_mask is None:
+        loss_mask = torch.ones_like(advantages, dtype=torch.bool)
+    else:
+        loss_mask = loss_mask.to(device=advantages.device, dtype=torch.bool)
+        loss_mask = torch.broadcast_to(loss_mask, advantages.shape)
+
+    group_ids = torch.as_tensor(group_ids, device=advantages.device)
+    while group_ids.ndim < advantages.ndim:
+        group_ids = group_ids.unsqueeze(-1)
+    group_ids = torch.broadcast_to(group_ids, advantages.shape)
+
+    normalized = advantages.clone()
+    valid_group_ids = torch.unique(group_ids[loss_mask])
+    for group_id in valid_group_ids:
+        group_mask = loss_mask & (group_ids == group_id)
+        valid_advantages = advantages[group_mask]
+        mean = valid_advantages.mean()
+        std = (
+            valid_advantages.std()
+            if valid_advantages.numel() > 1
+            else torch.zeros((), dtype=advantages.dtype, device=advantages.device)
+        )
+        normalized[group_mask] = (valid_advantages - mean) / (std + 1e-5)
+    return normalized
+
+
 @register_advantage("gae")
 def compute_gae_advantages_and_returns(
     rewards: torch.Tensor,
@@ -28,6 +60,8 @@ def compute_gae_advantages_and_returns(
     gae_lambda: float = 1.0,
     values: Optional[torch.Tensor] = None,
     normalize_advantages: bool = True,
+    group_normalize_advantages: bool = False,
+    advantage_group_ids: Optional[torch.Tensor] = None,
     normalize_returns: bool = False,
     loss_mask: Optional[torch.Tensor] = None,
     dones: Optional[torch.Tensor] = None,
@@ -79,7 +113,18 @@ def compute_gae_advantages_and_returns(
     advantages = returns - values[:-1] if not critic_free else returns
 
     if normalize_advantages:
-        advantages = safe_normalize(advantages, loss_mask=loss_mask)
+        if group_normalize_advantages:
+            if advantage_group_ids is None:
+                raise ValueError(
+                    "group_normalize_advantages requires advantage_group_ids"
+                )
+            advantages = normalize_advantages_by_group(
+                advantages,
+                advantage_group_ids,
+                loss_mask,
+            )
+        else:
+            advantages = safe_normalize(advantages, loss_mask=loss_mask)
     if normalize_returns:
         returns = safe_normalize(returns, loss_mask=loss_mask)
 
@@ -284,11 +329,15 @@ def compute_reinpp_advantages(
     Returns:
         torch.Tensor: advantages
     """
-    # first group baseline for reinforce++ baseline
+    # Embodied preprocessing may provide episode scores as [num_groups, group_size],
+    # while reasoning preprocessing provides [1, batch]. Normalize groups first,
+    # then flatten to the [batch] layout used by the token-time reward matrix.
     if use_reinpp_baseline:
-        grouped_rewards = rewards.view(-1, group_size)  # [num_prompt, group_size]
-        grouped_rewards -= grouped_rewards.mean(dim=1, keepdims=True)
-        rewards = grouped_rewards.view(-1)  # [B]
+        grouped_rewards = rewards.reshape(-1, group_size)
+        grouped_rewards = grouped_rewards - grouped_rewards.mean(dim=1, keepdim=True)
+        rewards = grouped_rewards.reshape(-1)
+    else:
+        rewards = rewards.reshape(-1)
 
     # build the reward matrix
     r_matrix = torch.zeros_like(loss_mask).float()  # [L, B]
@@ -299,7 +348,14 @@ def compute_reinpp_advantages(
     )  # position of last True in original mask
     eos_indices = seq_length - 1 - eos_positions  # [1, B]
 
-    r_matrix = r_matrix.scatter_(dim=0, index=eos_indices, src=rewards)  # [L, B]
+    if rewards.numel() != loss_mask.size(1):
+        raise ValueError(
+            "Reinforce++ reward batch does not match loss-mask batch: "
+            f"{rewards.numel()} != {loss_mask.size(1)}"
+        )
+    r_matrix = r_matrix.scatter_(
+        dim=0, index=eos_indices, src=rewards.reshape(1, -1)
+    )  # [L, B]
 
     # add kl penalty
     if kl_beta > 0:

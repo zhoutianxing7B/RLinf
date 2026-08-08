@@ -28,6 +28,7 @@ from rlinf.algorithms.expert import build_expert_model_config
 from rlinf.algorithms.registry import calculate_adv_and_returns, policy_loss
 from rlinf.algorithms.utils import (
     kl_penalty,
+    preprocess_loss_inputs,
 )
 from rlinf.config import SupportedModel, torch_dtype_from_precision
 from rlinf.data.embodied_io_struct import Trajectory, convert_trajectories_to_batch
@@ -44,6 +45,10 @@ from rlinf.hybrid_engines.weight_syncer import WeightSyncer
 from rlinf.models import get_model
 from rlinf.models.embodiment.base_policy import ForwardType
 from rlinf.scheduler import Channel, Cluster, Worker
+from rlinf.utils.checkpoint import (
+    gr00t_delay_adapter_missing_prefixes,
+    load_state_dict_with_allowed_missing,
+)
 from rlinf.utils.data_iter_utils import (
     get_iterator_k_split,
     get_reverse_idx,
@@ -98,12 +103,16 @@ def process_nested_dict_for_adv(nested_dict, rollout_epoch):
     for key, value in nested_dict.items():
         if isinstance(value, torch.Tensor):
             new_value = value.reshape(
-                rollout_epoch, -1, *value.shape[1:]
+                rollout_epoch, value.shape[0] // rollout_epoch, *value.shape[1:]
             )  # [rollout_epoch, n_chunk_step, bsz, ...]
             new_value = new_value.transpose(
                 0, 1
             )  # [n_chunk_step, rollout_epoch, bsz, ...]
-            new_value = new_value.reshape(new_value.shape[0], -1, *new_value.shape[3:])
+            new_value = new_value.reshape(
+                new_value.shape[0],
+                new_value.shape[1] * new_value.shape[2],
+                *new_value.shape[3:],
+            )
             ret_dict[key] = new_value
         elif isinstance(value, dict):
             ret_dict[key] = process_nested_dict_for_adv(value, rollout_epoch)
@@ -120,7 +129,9 @@ def process_nested_dict_for_train(nested_dict, shuffle_id):
         if value is None:
             ret_dict[key] = None
         if isinstance(value, torch.Tensor):
-            ret_dict[key] = value.reshape(-1, *value.shape[2:])[shuffle_id]
+            ret_dict[key] = value.reshape(
+                value.shape[0] * value.shape[1], *value.shape[2:]
+            )[shuffle_id]
         elif isinstance(value, dict):
             ret_dict[key] = process_nested_dict_for_train(value, shuffle_id)
     return ret_dict
@@ -1078,6 +1089,12 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         self._env_group_name = cfg.env.group_name
         self._rollout_group_name = cfg.rollout.group_name
         self._component_placement = HybridComponentPlacement(cfg, Cluster())
+        self.kl_beta = cfg.algorithm.get("kl_beta", 0.0)
+        self.kl_penalty_type = cfg.algorithm.get(
+            "kl_penalty_type", cfg.algorithm.get("kl_penalty", "kl")
+        )
+        self.ref_policy_state_dict = None
+        self.offload_model_buffer = {}
 
         # stage_num: default to 2, use for pipeline rollout process
         self.stage_num = cfg.rollout.pipeline_stage_num
@@ -1122,6 +1139,9 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         """
         self.setup_model_and_optimizer()
 
+        if self.kl_beta > 0:
+            self.ref_policy_state_dict = retrieve_model_state_dict_in_cpu(self.model)
+
         if self.enable_offload:
             self.offload_param_and_grad()
             self.offload_optimizer()
@@ -1133,7 +1153,44 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
 
         if self.cfg.runner.get("ckpt_path", None):
             model_dict = torch.load(self.cfg.runner.ckpt_path)
-            model.load_state_dict(model_dict)
+            rl_head_config = self.cfg.actor.model.get("rl_head_config", {})
+            dit_only = rl_head_config.get("drop_local_backbone", False)
+            if dit_only:
+                target_keys = set(model.state_dict())
+                unexpected_keys = set(model_dict) - target_keys
+                invalid_keys = [
+                    key for key in unexpected_keys if not key.startswith("backbone.")
+                ]
+                if invalid_keys:
+                    raise RuntimeError(
+                        "DiT-only checkpoint contains unexpected non-backbone keys: "
+                        f"{sorted(invalid_keys)[:20]}"
+                    )
+                model_dict = {
+                    key: value
+                    for key, value in model_dict.items()
+                    if key in target_keys
+                }
+                self.logger.info(
+                    "Discarded %d frozen backbone tensors while loading DiT-only actor",
+                    len(unexpected_keys),
+                )
+            if dit_only:
+                missing_keys = load_state_dict_with_allowed_missing(
+                    model,
+                    model_dict,
+                    allowed_missing_prefixes=gr00t_delay_adapter_missing_prefixes(
+                        rl_head_config
+                    ),
+                )
+                if missing_keys:
+                    self.logger.info(
+                        "Initialized %d new value-head tensors outside the actor "
+                        "override checkpoint",
+                        len(missing_keys),
+                    )
+            else:
+                model.load_state_dict(model_dict)
 
         return model
 
@@ -1225,6 +1282,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         original shape: [rollout_epoch x n_chunk_steps, bsz, num_action_chunks, ...]
         target shape: [n_chunk_steps, rollout_epoch x bsz, num_action_chunks, ...]
         """
+        self._reward_filter_metrics = {}
         rollout_epoch = self.cfg.env.train.rollout_epoch
         rollout_batch = process_nested_dict_for_adv(rollout_batch, rollout_epoch)
 
@@ -1277,6 +1335,12 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 mean_reward_in_group <= self.cfg.algorithm.rewards_upper_bound
             )  # [n_prompts]
 
+            self._reward_filter_metrics = {
+                "effective_group_fraction": reward_filter_mask.float().mean().item(),
+                "effective_groups_per_rank": reward_filter_mask.sum().item(),
+                "total_groups_per_rank": n_prompts,
+            }
+
             # extend mask dimension
             reward_filter_mask = reward_filter_mask.repeat_interleave(
                 group_size
@@ -1303,11 +1367,29 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         if self.cfg.algorithm.adv_type == "opd":
             self.compute_opd_teacher_logprobs()
 
+        forward_inputs = self.rollout_batch.get("forward_inputs", {})
+        task_ids = (
+            forward_inputs.get("rollout_task_ids")
+            if isinstance(forward_inputs, dict)
+            else None
+        )
+        normalize_by_task = self.cfg.algorithm.get(
+            "normalize_advantages_by_task", False
+        )
+        if normalize_by_task and task_ids is None:
+            raise ValueError(
+                "normalize_advantages_by_task requires rollout_task_ids in forward_inputs"
+            )
+
         kwargs = {
             "task_type": self.cfg.runner.task_type,
             "adv_type": self.cfg.algorithm.adv_type,
             "rewards": self.rollout_batch["rewards"],
             "dones": self.rollout_batch["dones"],
+            # A freshly initialized critic is not a valid bootstrap target. In
+            # the full-update warmup phase use Monte Carlo returns instead;
+            # otherwise its early errors are fed back into every advantage and
+            # the actor starts from a corrupted on-policy signal.
             "values": self.rollout_batch.get("prev_values", None),
             "prev_logprobs": self.rollout_batch.get("prev_logprobs", None),
             "teacher_logprobs": self.rollout_batch.get("teacher_logprobs", None),
@@ -1318,6 +1400,9 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             "reward_type": self.cfg.algorithm.reward_type,
             "loss_mask": self.rollout_batch.get("loss_mask", None),
             "loss_mask_sum": self.rollout_batch.get("loss_mask_sum", None),
+            "normalize_advantages": self.cfg.algorithm.normalize_advantages,
+            "group_normalize_advantages": normalize_by_task,
+            "advantage_group_ids": task_ids,
         }
 
         advantages_and_returns = calculate_adv_and_returns(**kwargs)
@@ -1329,6 +1414,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             self.rollout_batch.update({"loss_mask_sum": kwargs["loss_mask_sum"]})
 
         rollout_metrics = compute_rollout_metrics(self.rollout_batch)
+        rollout_metrics.update(self._reward_filter_metrics)
         return rollout_metrics
 
     @Worker.timer("actor/compute_opd_teacher_logprobs")
@@ -1491,6 +1577,48 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             )
         return loss
 
+    def _compute_reference_logprobs(self) -> torch.Tensor:
+        if self.ref_policy_state_dict is None:
+            raise RuntimeError("Reference policy state is required when kl_beta > 0")
+
+        rollout_size = self.rollout_batch["prev_logprobs"].size(0)
+        micro_batches = split_dict_to_chunk(
+            self.rollout_batch, rollout_size // self.cfg.actor.micro_batch_size
+        )
+        reference_logprobs = []
+        self.model.eval()
+        with (
+            cpu_weight_swap(
+                self.model, self.ref_policy_state_dict, self.offload_model_buffer
+            ),
+            torch.no_grad(),
+        ):
+            for micro_batch in micro_batches:
+                micro_batch = put_tensor_device(micro_batch, self.device)
+                kwargs = {}
+                if SupportedModel(self.cfg.actor.model.model_type) in [
+                    SupportedModel.GR00T,
+                    SupportedModel.GR00T_N1D6,
+                    SupportedModel.GR00T_N1D7,
+                    SupportedModel.ABOT_M0,
+                ]:
+                    kwargs["prev_logprobs"] = micro_batch["prev_logprobs"]
+                with self.amp_context:
+                    output_dict = self.model(
+                        forward_inputs=micro_batch.get("forward_inputs"),
+                        compute_logprobs=True,
+                        compute_entropy=False,
+                        compute_values=False,
+                        use_cache=False,
+                        **kwargs,
+                    )
+                reference_logprobs.append(
+                    output_dict["logprobs"].detach().float().cpu()
+                )
+
+        self.model.train()
+        return torch.cat(reference_logprobs, dim=0)
+
     @Worker.timer("run_training")
     def run_training(self) -> None:
         """
@@ -1528,6 +1656,9 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 self.rollout_batch, shuffle_id
             )
 
+        if self.kl_beta > 0:
+            self.rollout_batch["ref_logprobs"] = self._compute_reference_logprobs()
+
         # Split to make minibatch iterator for updating the actor
         # See PPO paper for details. https://arxiv.org/abs/1707.06347
         rollout_size = self.rollout_batch["prev_logprobs"].size(0)
@@ -1536,8 +1667,9 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             f"{rollout_size} is not divisible by {batch_size_per_rank}"
         )
         metrics = {}
-        update_epoch = self.cfg.algorithm.get("update_epoch", 1)
-        for _ in range(update_epoch):
+        update_epoch = int(self.cfg.algorithm.get("update_epoch", 1))
+
+        def train_epoch() -> None:
             rollout_dataloader_iter = split_dict_to_chunk(
                 self.rollout_batch,
                 rollout_size // batch_size_per_rank,
@@ -1580,6 +1712,9 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 if len(lr_list) > 1:
                     data["critic/lr"] = lr_list[1]
                 append_to_dict(metrics, data)
+
+        for _ in range(update_epoch):
+            train_epoch()
         # put LR scheduler step here
         self.lr_scheduler.step()
         self.optimizer.zero_grad()
@@ -1650,6 +1785,47 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         ]:
             prev_logprobs = output_dict["prev_logprobs"]
 
+        if self.cfg.algorithm.get("identity_test", False):
+            # Compare against the exact old-logprob tensor consumed by PPO,
+            # after the GR00T head has selected the rollout denoising index.
+            identity_old = prev_logprobs.detach().float()
+            identity_current = output_dict["logprobs"].detach().float()
+            if identity_old.shape != identity_current.shape:
+                identity_old = identity_old.reshape_as(identity_current)
+            identity_delta = identity_current - identity_old
+            identity_ratio = torch.exp(identity_delta.clamp(-20.0, 20.0))
+            chunk_delta = identity_delta.reshape(identity_delta.shape[0], -1).sum(-1)
+            chunk_ratio = torch.exp(chunk_delta.clamp(-20.0, 20.0))
+            identity_inputs = preprocess_loss_inputs(
+                logprobs=identity_current,
+                old_logprobs=identity_old,
+                advantages=advantages,
+                logprob_type=self.cfg.algorithm.logprob_type,
+                single_action_dim=self.cfg.actor.model.get("action_dim", 7),
+                loss_mask=loss_mask,
+                reward_type=self.cfg.algorithm.reward_type,
+            )
+            ppo_log_ratio = (
+                identity_inputs["logprobs"] - identity_inputs["old_logprobs"]
+            )
+            ppo_ratio = torch.exp(ppo_log_ratio.clamp(-20.0, 20.0))
+            append_to_dict(metrics, {
+                "identity/logprob_abs_mean": identity_delta.abs().mean().item(),
+                "identity/logprob_abs_max": identity_delta.abs().max().item(),
+                "identity/logprob_delta_mean": identity_delta.mean().item(),
+                "identity/ratio_mean": identity_ratio.mean().item(),
+                "identity/ratio_std": identity_ratio.std().item(),
+                "identity/chunk_logprob_abs_mean": chunk_delta.abs().mean().item(),
+                "identity/chunk_ratio_mean": chunk_ratio.mean().item(),
+                "identity/chunk_ratio_std": chunk_ratio.std().item(),
+                "identity/ppo_logratio_mean": masked_mean(
+                    ppo_log_ratio, identity_inputs["loss_mask"]
+                ).item(),
+                "identity/ppo_ratio_mean": masked_mean(
+                    ppo_ratio, identity_inputs["loss_mask"]
+                ).item(),
+            })
+
         loss_kwargs = {
             "loss_type": self.cfg.algorithm.loss_type,
             "logprob_type": self.cfg.algorithm.logprob_type,
@@ -1669,7 +1845,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             "loss_mask_sum": loss_mask_sum,
             "max_episode_steps": self.cfg.env.train.max_episode_steps,
             "task_type": self.cfg.runner.task_type,
-            "critic_warmup": self.optimizer_steps < self.critic_warmup_steps,
+            "critic_warmup": self.is_critic_warmup_active(),
         }
 
         if SupportedModel(self.cfg.actor.model.model_type) in [
@@ -1687,6 +1863,32 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 )
 
         loss, metrics_data = policy_loss(**loss_kwargs)
+        reference_kl_loss = torch.tensor(
+            0.0, device=Worker.torch_platform.current_device()
+        )
+        # Critic warmup must leave the policy untouched. The PPO actor term is
+        # disabled inside policy_loss; gate the reference KL for the same reason.
+        if self.kl_beta > 0 and not loss_kwargs["critic_warmup"]:
+            ref_logprobs = micro_batch.get("ref_logprobs")
+            if ref_logprobs is None:
+                raise RuntimeError("ref_logprobs are required when kl_beta > 0")
+            reference_inputs = preprocess_loss_inputs(
+                logprobs=output_dict["logprobs"],
+                old_logprobs=ref_logprobs,
+                advantages=advantages,
+                logprob_type=self.cfg.algorithm.logprob_type,
+                single_action_dim=self.cfg.actor.model.get("action_dim", 7),
+                loss_mask=loss_mask,
+                reward_type=self.cfg.algorithm.reward_type,
+            )
+            reference_kl = kl_penalty(
+                reference_inputs["logprobs"],
+                reference_inputs["old_logprobs"],
+                self.kl_penalty_type,
+            )
+            reference_kl_loss = masked_mean(reference_kl, reference_inputs["loss_mask"])
+            loss += self.kl_beta * reference_kl_loss
+        metrics_data["actor/reference_kl_loss"] = reference_kl_loss.detach().item()
         entropy_loss = torch.tensor(0.0, device=Worker.torch_platform.current_device())
         if self.cfg.algorithm.entropy_bonus > 0 and not loss_kwargs["critic_warmup"]:
             entropy = output_dict["entropy"]

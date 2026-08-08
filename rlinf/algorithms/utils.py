@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 from typing import Optional
 
 import torch
@@ -112,7 +113,7 @@ def preprocess_embodied_advantages_inputs(
     )
     dones = flattened_dones_full[-(n_steps + 1) :]
 
-    if kwargs["adv_type"] == "gae":
+    if kwargs["adv_type"] == "gae" and values is not None:
         flattened_values_full = values.transpose(1, 2).reshape(
             (num_chunk + 1) * chunk_size, bsz
         )
@@ -388,10 +389,25 @@ def postprocess_loss_metric(metrics_data: dict) -> dict:
 def expand_to_target_dim(tensor, target_shape):
     if tensor is None:
         return None
-    if tensor.shape != target_shape:
-        while len(tensor.shape) < len(target_shape):
-            tensor = tensor.unsqueeze(-1)
-    return tensor
+    target_shape = torch.Size(target_shape)
+    if tensor.shape == target_shape:
+        return tensor
+
+    # Exact-numel tensors should be reshaped before broadcast. Otherwise a
+    # chunk-level [B, 1] mask can silently expand against [B] as [B, B].
+    if tensor.numel() == math.prod(target_shape):
+        return tensor.reshape(target_shape)
+
+    expanded = tensor
+    while expanded.ndim < len(target_shape):
+        expanded = expanded.unsqueeze(-1)
+    try:
+        return torch.broadcast_to(expanded, target_shape)
+    except RuntimeError as exc:
+        raise ValueError(
+            f"Cannot align tensor shape {tuple(tensor.shape)} to target "
+            f"{tuple(target_shape)}"
+        ) from exc
 
 
 def safe_normalize(array, loss_mask):
