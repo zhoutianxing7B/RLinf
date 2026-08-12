@@ -21,6 +21,7 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from rlinf.config import SupportedModel
 from rlinf.data.lerobot_paths import resolve_lerobot_repo_id
 from rlinf.models.embodiment.base_policy import ForwardType
+from rlinf.utils.nested_dict_process import put_tensor_device
 from rlinf.utils.utils import get_rng_state, set_rng_state
 from rlinf.workers.sft.fsdp_sft_worker import FSDPSftWorker
 
@@ -29,7 +30,23 @@ class FSDPVlaSftWorker(FSDPSftWorker):
     def __init__(self, cfg: DictConfig):
         super().__init__(cfg)
 
+    def _uses_shared_semantic_action_dataset(self) -> bool:
+        return (
+            SupportedModel(self.cfg.actor.model.model_type)
+            == SupportedModel.GR00T_N1D7
+            and str(self.cfg.data.get("dataset_type", ""))
+            == "shared_semantic_action"
+        )
+
     def build_dataloader(self, data_paths: Any, eval_dataset: bool = False):
+        if self._uses_shared_semantic_action_dataset():
+            from rlinf.data.datasets.shared_semantic_action import (
+                build_shared_semantic_action_dataloader,
+            )
+
+            return build_shared_semantic_action_dataloader(
+                self.cfg, self._world_size, self._rank, data_paths, eval_dataset
+            )
         if (
             SupportedModel(self.cfg.actor.model.model_type)
             == SupportedModel.OPENPI_PYTORCH
@@ -102,6 +119,8 @@ class FSDPVlaSftWorker(FSDPSftWorker):
         raise NotImplementedError("eval is not supported for embodied sft right now.")
 
     def get_train_model_output(self, batch: Any) -> tuple[torch.Tensor, dict[str, Any]]:
+        if self._uses_shared_semantic_action_dataset():
+            batch = put_tensor_device(batch, self.device)
         with self.amp_context:
             output = self.model(forward_type=ForwardType.SFT, data=batch)
 

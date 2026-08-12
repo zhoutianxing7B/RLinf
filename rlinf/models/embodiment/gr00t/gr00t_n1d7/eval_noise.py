@@ -69,6 +69,19 @@ def eval_semantic_age_frames(
     ]
 
 
+def eval_semantic_age_frame(
+    rollout_step: int,
+    stream_id: int,
+    min_frames: int,
+    max_frames: int,
+    seed: int,
+) -> int:
+    """Choose one deterministic age shared by an evaluation env chunk."""
+    minimum, maximum = _validate_age_range(min_frames, max_frames)
+    width = maximum - minimum + 1
+    return minimum + _stable_int("eval-stream-age", seed, stream_id, rollout_step) % width
+
+
 def train_semantic_age_frame(
     rollout_step: int,
     stream_id: int,

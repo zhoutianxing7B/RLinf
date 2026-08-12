@@ -21,7 +21,11 @@ import torch
 from omegaconf import DictConfig, OmegaConf, open_dict
 from torch.utils.data import DataLoader, DistributedSampler
 
-from rlinf.data.datasets.reward_model import RewardBinaryDataset
+from rlinf.data.datasets.reward_model import (
+    RewardBinaryDataset,
+    SharedSemanticRewardDataset,
+    SharedSemanticRolloutDataset,
+)
 from rlinf.data.io_struct import RolloutResult
 from rlinf.data.tokenizers import hf_tokenizer
 from rlinf.hybrid_engines.fsdp.fsdp_model_manager import FSDPModelManager
@@ -340,6 +344,12 @@ class EmbodiedRewardWorker(Worker):
         may override this method; they should return through
         :meth:`_format_reward_output` so env-side broadcasting stays consistent.
         """
+        skip_reward = observations.get("skip_reward")
+        if skip_reward is not None:
+            skip_reward = torch.as_tensor(skip_reward, dtype=torch.bool).reshape(-1)
+            if not bool(skip_reward.all()):
+                raise ValueError("skip_reward must cover the complete reward batch")
+            return torch.zeros((skip_reward.numel(), 1), dtype=torch.float32)
         return self._format_reward_output(self.model.compute_reward(observations))
 
     async def compute_rewards_async(
@@ -449,8 +459,22 @@ class FSDPRewardWorker(FSDPModelManager, Worker):
             f"Loading preprocessed reward datasets from "
             f"{train_data_paths} and {val_data_paths}"
         )
-        train_dataset = RewardBinaryDataset(train_data_paths)
-        val_dataset = RewardBinaryDataset(val_data_paths)
+        dataset_type = str(data_cfg.get("dataset_type", "binary_image"))
+        dataset_cls = {
+            "binary_image": RewardBinaryDataset,
+            "shared_semantic": SharedSemanticRewardDataset,
+            "shared_semantic_rollout": SharedSemanticRolloutDataset,
+        }.get(dataset_type)
+        if dataset_cls is None:
+            raise ValueError(f"Unsupported reward dataset_type: {dataset_type}")
+        raw_dataset_kwargs = data_cfg.get("dataset_kwargs", {})
+        dataset_kwargs = (
+            OmegaConf.to_container(raw_dataset_kwargs, resolve=True)
+            if OmegaConf.is_config(raw_dataset_kwargs)
+            else dict(raw_dataset_kwargs)
+        )
+        train_dataset = dataset_cls(train_data_paths, **dataset_kwargs)
+        val_dataset = dataset_cls(val_data_paths, **dataset_kwargs)
 
         if len(train_dataset) == 0:
             self.logger.warning("Training dataset is empty")
@@ -510,20 +534,19 @@ class FSDPRewardWorker(FSDPModelManager, Worker):
                 is_last_micro_batch=(idx + 1) == self.gradient_accumulation,
             )
 
-            # Get batch (image, label)
+            # Get a model input and its labels.
             try:
-                images, labels = next(self.data_iter)
+                model_input, labels = next(self.data_iter)
             except StopIteration:
                 self.data_iter = iter(self.data_loader)
-                images, labels = next(self.data_iter)
+                model_input, labels = next(self.data_iter)
 
-            # Move to device: images shape is (B, C, H, W), labels shape is (B,)
-            images = images.to(self.device)
-            labels = labels.to(self.device)
+            model_input = self._move_batch_to_device(model_input)
+            labels = self._move_batch_to_device(labels)
 
             with self.amp_context:
                 # Forward pass - loss computed inside model
-                outputs = self.model(images, labels)
+                outputs = self.model(model_input, labels)
                 loss = outputs["loss"]
 
             loss = loss / self.gradient_accumulation
@@ -531,14 +554,7 @@ class FSDPRewardWorker(FSDPModelManager, Worker):
                 self.grad_scaler.scale(loss).backward()
 
             # Accumulate metrics
-            append_to_dict(
-                metrics,
-                {
-                    "loss": outputs["loss"].item(),
-                    "accuracy": outputs["accuracy"].item(),
-                    "probabilities_mean": outputs["probabilities"].mean().item(),
-                },
-            )
+            append_to_dict(metrics, self._model_metrics(outputs))
 
         grad_norm, lr_list = self.optimizer_step()
         self.optimizer.zero_grad(set_to_none=True)
@@ -578,20 +594,17 @@ class FSDPRewardWorker(FSDPModelManager, Worker):
         metrics = {}
 
         with torch.no_grad():
-            for images, labels in self.val_loader:
-                images = images.to(self.device)
-                labels = labels.to(self.device)
+            for model_input, labels in self.val_loader:
+                model_input = self._move_batch_to_device(model_input)
+                labels = self._move_batch_to_device(labels)
                 with self.amp_context:
-                    outputs = self.model(images, labels)
+                    outputs = self.model(model_input, labels)
 
                 append_to_dict(
                     metrics,
                     {
-                        "val_loss": outputs["loss"].item(),
-                        "val_accuracy": outputs["accuracy"].item(),
-                        "val_probabilities_mean": outputs["probabilities"]
-                        .mean()
-                        .item(),
+                        f"val_{key}": value
+                        for key, value in self._model_metrics(outputs).items()
                     },
                 )
 
@@ -604,3 +617,30 @@ class FSDPRewardWorker(FSDPModelManager, Worker):
         if self.data_loader is not None:
             return max(1, len(self.data_loader) // self.gradient_accumulation)
         return 0
+
+    def _move_batch_to_device(self, value):
+        if torch.is_tensor(value):
+            return value.to(self.device)
+        if isinstance(value, dict):
+            return {
+                key: self._move_batch_to_device(item) for key, item in value.items()
+            }
+        return value
+
+    @staticmethod
+    def _model_metrics(outputs: dict[str, Any]) -> dict[str, float]:
+        metrics = {
+            "loss": outputs["loss"].item(),
+            "accuracy": outputs["accuracy"].item(),
+        }
+        for key in (
+            "probabilities",
+            "progress",
+            "completion",
+            "failure",
+            "uncertainty",
+        ):
+            value = outputs.get(key)
+            if torch.is_tensor(value):
+                metrics[f"{key}_mean"] = value.detach().float().mean().item()
+        return metrics

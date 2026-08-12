@@ -36,7 +36,6 @@ from transformers.feature_extraction_utils import BatchFeature
 from rlinf.models.embodiment.base_policy import BasePolicy, ForwardType
 from rlinf.models.embodiment.gr00t.gr00t_n1d7.eval_noise import (
     eval_noise_seeds,
-    eval_semantic_age_frames,
     stable_text_ids,
 )
 from rlinf.models.embodiment.gr00t.gr00t_n1d7.semantic_server import (
@@ -1898,8 +1897,41 @@ class GR00T_N1_7_ForRLActionPrediction(Gr00tN1d7, BasePolicy):
     def forward(self, forward_type=ForwardType.DEFAULT, **kwargs):
         if forward_type == ForwardType.DEFAULT:
             return self.default_forward(**kwargs)
-        else:
-            raise NotImplementedError
+        if forward_type == ForwardType.SFT:
+            return self.sft_forward(**kwargs)
+        raise NotImplementedError
+
+    def sft_forward(self, data: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        """Run upstream N1.7 flow-matching SFT on cached semantic packets."""
+        normalized_input = _normalize_gr00t_forward_inputs(data)
+        semantic_keys = {
+            key: key.removeprefix("semantic_")
+            for key in normalized_input
+            if key.startswith("semantic_")
+        }
+        if "backbone_features" not in semantic_keys.values():
+            raise ValueError("Cached action SFT requires semantic_backbone_features")
+        backbone_output = BatchFeature(
+            data={
+                target: normalized_input[source]
+                for source, target in semantic_keys.items()
+            }
+        )
+        action_input = self.action_head.prepare_input(normalized_input)
+        required = {"state", "action", "action_mask", "embodiment_id"}
+        missing = required - set(action_input)
+        if missing:
+            raise ValueError(f"Cached action SFT is missing {sorted(missing)}")
+        if self._require_packet_age_input and "packet_age_s" not in action_input:
+            raise ValueError("Cached action SFT requires packet_age_s")
+
+        # Call the upstream objective explicitly because the RL action head's
+        # public forward method is reserved for PPO denoising-chain replay.
+        return Gr00tN1d7ActionHead.forward(
+            self.action_head,
+            backbone_output=backbone_output,
+            action_input=action_input,
+        )
 
     def default_forward(
         self,
@@ -1999,6 +2031,7 @@ class GR00T_N1_7_ForRLActionPrediction(Gr00tN1d7, BasePolicy):
         self,
         env_obs,
         mode: Literal["train", "eval"] = "train",
+        return_semantic_features: bool = False,
         **kwargs,
     ):
         """Rollout entry point: produce env-ready actions and RL bookkeeping."""
@@ -2041,7 +2074,9 @@ class GR00T_N1_7_ForRLActionPrediction(Gr00tN1d7, BasePolicy):
         self._rollout_profile_mark("metadata")
         observations, obs_copy, is_batch = self._prepare_rollout_observation(env_obs)
         self._rollout_profile_mark("observation_prepare")
-        normalized_action, result = self._predict_normalized_action(obs_copy, mode)
+        normalized_action, result = self._predict_normalized_action(
+            obs_copy, mode, return_semantic_features=return_semantic_features
+        )
         unnormalized_action = self._get_unnormalized_action(
             normalized_action,
             state=observations,
@@ -2104,10 +2139,26 @@ class GR00T_N1_7_ForRLActionPrediction(Gr00tN1d7, BasePolicy):
         obs_copy = self._coerce_observation_values_to_numpy(obs_copy)
         return observations, obs_copy, is_batch
 
+    def prepare_action_condition_batch(
+        self, env_obs: dict[str, Any]
+    ) -> dict[str, torch.Tensor]:
+        """Encode action-side state fields without running the VLM or DiT."""
+        _, obs_copy, _ = self._prepare_rollout_observation(dict(env_obs))
+        action_input = _prepare_action_only_observation(
+            self._modality_transform, obs_copy, self.embodiment_tag
+        )
+        return {
+            key: value.to(self.compute_dtype) if value.is_floating_point() else value
+            for key, value in dict(action_input).items()
+            if key in {"state", "embodiment_id"}
+        }
+
     def _predict_normalized_action(
         self,
         obs_copy: dict[str, Any],
         mode: Literal["train", "eval"],
+        *,
+        return_semantic_features: bool = False,
     ) -> tuple[torch.Tensor, dict[str, Any]]:
         """Run the policy and return normalized actions plus RL bookkeeping."""
         if (
@@ -2131,11 +2182,19 @@ class GR00T_N1_7_ForRLActionPrediction(Gr00tN1d7, BasePolicy):
         self._rollout_profile_mark("canonicalize")
 
         if mode == "eval":
-            normalized_action = self._get_deterministic_eval_action(normalized_input)
+            eval_result = self._get_deterministic_eval_action(
+                normalized_input,
+                return_semantic_features=return_semantic_features,
+            )
+            if return_semantic_features:
+                normalized_action, semantic_inputs = eval_result
+            else:
+                normalized_action = eval_result
+                semantic_inputs = {}
             result = {
                 "prev_logprobs": None,
                 "prev_values": None,
-                "forward_inputs": {},
+                "forward_inputs": semantic_inputs,
             }
         else:
             normalized_action, result = self._get_rl_action(
@@ -2510,6 +2569,21 @@ class GR00T_N1_7_ForRLActionPrediction(Gr00tN1d7, BasePolicy):
                     floating_dtype=self.compute_dtype,
                 )
                 self._latest_semantic_metadata = dict(response_metadata)
+            required_metadata = {
+                "source_frame_ids",
+                "source_wallclock_s",
+                "semantic_versions",
+                "episode_generations",
+            }
+            missing_metadata = required_metadata - set(response_metadata)
+            if outputs is None or missing_metadata:
+                server_error = response_metadata.get(
+                    "error", "unknown semantic server error"
+                )
+                raise RuntimeError(
+                    "Semantic server returned an invalid cache response: "
+                    f"missing={sorted(missing_metadata)}, error={server_error}"
+                )
             source_frames = torch.as_tensor(
                 response_metadata["source_frame_ids"],
                 device=outputs["backbone_features"].device,
@@ -2640,12 +2714,27 @@ class GR00T_N1_7_ForRLActionPrediction(Gr00tN1d7, BasePolicy):
     ) -> list[int] | None:
         random_max = getattr(self, "_semantic_eval_random_age_max_frames", -1)
         if random_max >= 0:
-            return eval_semantic_age_frames(
-                torch.as_tensor(current_frames, dtype=torch.int64),
-                getattr(self, "_semantic_eval_random_age_min_frames", 0),
-                random_max,
-                getattr(self, "_semantic_eval_random_age_seed", 2026),
-            )
+            metadata_ages = self._rollout_semantic_metadata.get("target_age_frames")
+            if metadata_ages is None:
+                raise RuntimeError(
+                    "Exact-age semantic eval requires target_age_frames from the env worker"
+                )
+            requested_ages = [int(value) for value in metadata_ages.tolist()]
+            if len(requested_ages) != len(current_frames):
+                raise RuntimeError(
+                    "Exact-age semantic eval received a mismatched target-age batch: "
+                    f"ages={len(requested_ages)} frames={len(current_frames)}"
+                )
+            random_min = getattr(self, "_semantic_eval_random_age_min_frames", 0)
+            invalid = [
+                age for age in requested_ages if age < random_min or age > random_max
+            ]
+            if invalid:
+                raise RuntimeError(
+                    "Exact-age semantic eval received ages outside the configured range: "
+                    f"invalid={invalid} range=[{random_min}, {random_max}]"
+                )
+            return requested_ages
         fixed_age = getattr(self, "_semantic_eval_fixed_age_frames", -1)
         if fixed_age < 0:
             return None
@@ -3034,6 +3123,7 @@ class GR00T_N1_7_ForRLActionPrediction(Gr00tN1d7, BasePolicy):
         forward_inputs = {
             "chains": rlinf_outputs["chains"],
             "denoise_inds": rlinf_outputs["denoise_inds"],
+            "rollout_normalized_executed_actions": actions.detach(),
             **stashed_forward_inputs,
             **semantic_forward_inputs,
         }
@@ -3052,6 +3142,16 @@ class GR00T_N1_7_ForRLActionPrediction(Gr00tN1d7, BasePolicy):
                     ),
                     "rollout_semantic_versions": torch.as_tensor(
                         semantic_meta["semantic_versions"], device=actions.device
+                    ),
+                    "rollout_semantic_source_wallclock_s": torch.as_tensor(
+                        semantic_meta["source_wallclock_s"],
+                        dtype=torch.float64,
+                        device=actions.device,
+                    ),
+                    "rollout_semantic_completed_wallclock_s": torch.as_tensor(
+                        semantic_meta["completed_wallclock_s"],
+                        dtype=torch.float64,
+                        device=actions.device,
                     ),
                     "action_frame_ids": self._rollout_semantic_metadata["frame_ids"].to(
                         actions.device
@@ -3144,8 +3244,11 @@ class GR00T_N1_7_ForRLActionPrediction(Gr00tN1d7, BasePolicy):
         return torch.stack(rows, dim=0)
 
     def _get_deterministic_eval_action(
-        self, normalized_input: dict[str, Any]
-    ) -> torch.Tensor:
+        self,
+        normalized_input: dict[str, Any],
+        *,
+        return_semantic_features: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
         normalized_input = _normalize_gr00t_forward_inputs(normalized_input)
         backbone_inputs, action_inputs = self.prepare_input(normalized_input)
         semantic_fetch_started = time.perf_counter()
@@ -3198,7 +3301,66 @@ class GR00T_N1_7_ForRLActionPrediction(Gr00tN1d7, BasePolicy):
         self._append_executed_action_history(actions)
         if hasattr(self, "validate_data"):
             self.validate_data(model_pred, backbone_outputs, is_training=False)
-        return actions.float()
+        actions = actions.float()
+        if not return_semantic_features:
+            return actions
+
+        forward_inputs = {
+            key: value.detach()
+            for key, value in dict(action_inputs).items()
+            if torch.is_tensor(value)
+        }
+        forward_inputs["rollout_normalized_executed_actions"] = actions.detach()
+        forward_inputs.update(
+            {
+                f"semantic_{key}": value.detach()
+                for key, value in dict(backbone_outputs).items()
+            }
+        )
+        if self._semantic_central_cache and self._latest_semantic_metadata:
+            metadata = self._latest_semantic_metadata
+            device = actions.device
+            batch_size = actions.shape[0]
+            current_frames = self._rollout_semantic_metadata["frame_ids"].to(device)
+            forward_inputs.update(
+                {
+                    "rollout_semantic_source_frame_ids": torch.as_tensor(
+                        metadata["source_frame_ids"], device=device
+                    ),
+                    "rollout_semantic_episode_generations": self._rollout_semantic_metadata[
+                        "episode_generations"
+                    ].to(device),
+                    "rollout_semantic_versions": torch.as_tensor(
+                        metadata["semantic_versions"], device=device
+                    ),
+                    "rollout_semantic_source_wallclock_s": torch.as_tensor(
+                        metadata["source_wallclock_s"],
+                        dtype=torch.float64,
+                        device=device,
+                    ),
+                    "rollout_semantic_completed_wallclock_s": torch.as_tensor(
+                        metadata["completed_wallclock_s"],
+                        dtype=torch.float64,
+                        device=device,
+                    ),
+                    "action_frame_ids": current_frames,
+                    "action_wallclock_s": torch.full(
+                        (batch_size,),
+                        time.time(),
+                        dtype=torch.float64,
+                        device=device,
+                    ),
+                }
+            )
+        if "task_ids" in self._rollout_semantic_metadata:
+            forward_inputs["rollout_task_ids"] = self._rollout_semantic_metadata[
+                "task_ids"
+            ].to(actions.device)
+        if "trial_ids" in self._rollout_semantic_metadata:
+            forward_inputs["rollout_trial_ids"] = self._rollout_semantic_metadata[
+                "trial_ids"
+            ].to(actions.device)
+        return actions, forward_inputs
 
     def _finalize_rollout_forward_inputs(
         self,

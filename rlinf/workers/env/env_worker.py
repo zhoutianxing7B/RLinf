@@ -39,6 +39,7 @@ from rlinf.envs.action_utils import prepare_actions
 from rlinf.envs.utils import get_env_attr
 from rlinf.envs.wrappers import RecordVideo
 from rlinf.models.embodiment.gr00t.gr00t_n1d7.eval_noise import (
+    eval_semantic_age_frame,
     eval_semantic_age_frames,
     train_semantic_age_frame,
 )
@@ -147,6 +148,20 @@ class EnvWorker(Worker):
         self.use_external_reward_model = (
             self.use_reward_model and not self.use_realworld_reward
         )
+        reward_model_type = str(
+            self.cfg.get("reward", {}).get("model", {}).get("model_type", "")
+        )
+        self.use_shared_semantic_reward = (
+            self.use_external_reward_model
+            and reward_model_type == "shared_semantic_temporal"
+        )
+        self.semantic_reward_assign_mode = str(
+            self.cfg.get("reward", {}).get("semantic_interval_assign", "endpoint")
+        )
+        if self.semantic_reward_assign_mode not in {"endpoint", "uniform"}:
+            raise ValueError(
+                "reward.semantic_interval_assign must be endpoint or uniform"
+            )
         self.env_infos_reward_keys = ("success", "episode", "final_info")
         if self.use_external_reward_model:
             self.reward_weight = self.cfg.reward.get("reward_weight", 1.0)
@@ -221,6 +236,12 @@ class EnvWorker(Worker):
                 torch.zeros(self.train_num_envs_per_stage, dtype=torch.bool)
                 for _ in range(self.stage_num)
             ]
+            self._semantic_reward_previous_packets: list[
+                list[tuple[int, int, int] | None]
+            ] = [
+                [None for _ in range(self.train_num_envs_per_stage)]
+                for _ in range(self.stage_num)
+            ]
         if self.enable_eval:
             self.eval_prev_done: list[torch.Tensor] = [
                 torch.zeros(self.eval_num_envs_per_stage, dtype=torch.bool)
@@ -286,6 +307,8 @@ class EnvWorker(Worker):
         )
         self._semantic_train_rollout_step = [0 for _ in range(self.stage_num)]
         self._semantic_train_target_age = [0 for _ in range(self.stage_num)]
+        self._semantic_eval_rollout_step = [0 for _ in range(self.stage_num)]
+        self._semantic_eval_target_age = [0 for _ in range(self.stage_num)]
         if self._semantic_train_random_age_max_frames >= 0:
             train_semantic_age_frame(
                 0,
@@ -1035,7 +1058,35 @@ class EnvWorker(Worker):
         recv_channel: Channel,
         stage_id: int | None = None,
         last_run: bool = False,
+        policy_forward_inputs: dict[str, torch.Tensor] | None = None,
     ):
+        if self.use_shared_semantic_reward and not policy_forward_inputs:
+            terminal_marker = {
+                "skip_reward": torch.ones(
+                    (self.train_num_envs_per_stage, 1), dtype=torch.bool
+                ),
+                "last_run": torch.full(
+                    (self.train_num_envs_per_stage, 1),
+                    last_run,
+                    dtype=torch.bool,
+                ),
+            }
+            self.send_to(
+                group_name=self.cfg.reward.group_name,
+                channel=send_channel,
+                data=terminal_marker,
+                tag="train_reward_obs",
+                async_op=True,
+                decoupled_mode=self.env_decoupled_mode,
+            )
+            self.recv_from(
+                group_name=self.cfg.reward.group_name,
+                channel=recv_channel,
+                tag="train_reward_obs",
+                batch_size=self.train_batch_size,
+                decoupled_mode=self.env_decoupled_mode,
+            )
+            return None
         if self.reward_mode in {"per_step", "history_buffer"}:
             observations = (
                 env_output.final_obs
@@ -1047,6 +1098,21 @@ class EnvWorker(Worker):
         else:
             return None
         reward_input = dict(observations)
+        semantic_history_entry = None
+        if self.use_shared_semantic_reward:
+            if policy_forward_inputs is None:
+                raise ValueError(
+                    "shared semantic reward requires rollout forward_inputs"
+                )
+            semantic_history_entry = self._shared_semantic_reward_entry(
+                policy_forward_inputs
+            )
+            reward_input = {
+                "task_ids": semantic_history_entry.pop("task_ids"),
+            }
+            trial_ids = semantic_history_entry.pop("trial_ids", None)
+            if trial_ids is not None:
+                reward_input["trial_ids"] = trial_ids
         if env_output.env_infos is not None:
             reward_input["env_infos"] = self._select_reward_env_infos(
                 env_output.env_infos
@@ -1061,7 +1127,11 @@ class EnvWorker(Worker):
             if stage_id is None:
                 raise ValueError("stage_id is required for history-buffer reward.")
             history_manager = self.train_history_managers[stage_id]
-            history_manager.append_to_history_entries(observations)
+            history_manager.append_to_history_entries(
+                semantic_history_entry
+                if semantic_history_entry is not None
+                else observations
+            )
             history_input, history_lengths = history_manager.build_history_input(
                 dones=dones
             )
@@ -1096,6 +1166,72 @@ class EnvWorker(Worker):
         return self._scatter_terminal_reward_output(
             env_output=env_output, reward_output=reward_output
         )
+
+    @staticmethod
+    def _shared_semantic_reward_entry(
+        forward_inputs: dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        required = {
+            "semantic_backbone_features",
+            "rollout_semantic_source_frame_ids",
+            "rollout_semantic_episode_generations",
+            "rollout_semantic_versions",
+            "action_frame_ids",
+            "packet_age_s",
+            "rollout_task_ids",
+            "state",
+            "action_history",
+            "embodiment_id",
+        }
+        missing = required - set(forward_inputs)
+        if missing:
+            raise ValueError(
+                f"shared semantic reward is missing rollout fields: {sorted(missing)}"
+            )
+        tokens = forward_inputs["semantic_backbone_features"]
+        attention_mask = forward_inputs.get("semantic_backbone_attention_mask")
+        if attention_mask is None:
+            attention_mask = torch.ones(
+                tokens.shape[:-1], device=tokens.device, dtype=torch.bool
+            )
+        entry = {
+            "semantic_tokens": tokens,
+            "semantic_attention_mask": attention_mask,
+            "semantic_source_frame_ids": forward_inputs[
+                "rollout_semantic_source_frame_ids"
+            ],
+            "semantic_episode_generations": forward_inputs[
+                "rollout_semantic_episode_generations"
+            ],
+            "semantic_versions": forward_inputs["rollout_semantic_versions"],
+            "semantic_source_wallclock_s": forward_inputs.get(
+                "rollout_semantic_source_wallclock_s",
+                torch.zeros_like(
+                    forward_inputs["action_frame_ids"], dtype=torch.float64
+                ),
+            ),
+            "semantic_completed_wallclock_s": forward_inputs.get(
+                "rollout_semantic_completed_wallclock_s",
+                torch.zeros_like(
+                    forward_inputs["action_frame_ids"], dtype=torch.float64
+                ),
+            ),
+            "action_frame_ids": forward_inputs["action_frame_ids"],
+            "action_wallclock_s": forward_inputs.get(
+                "action_wallclock_s",
+                torch.zeros_like(
+                    forward_inputs["action_frame_ids"], dtype=torch.float64
+                ),
+            ),
+            "packet_age_s": forward_inputs["packet_age_s"],
+            "task_ids": forward_inputs["rollout_task_ids"],
+            "action_states": forward_inputs["state"],
+            "action_history": forward_inputs["action_history"],
+            "embodiment_ids": forward_inputs["embodiment_id"],
+        }
+        if "rollout_trial_ids" in forward_inputs:
+            entry["trial_ids"] = forward_inputs["rollout_trial_ids"]
+        return entry
 
     def _select_reward_env_infos(self, env_infos: dict[str, Any]) -> dict[str, Any]:
         reward_env_infos = {}
@@ -1146,6 +1282,91 @@ class EnvWorker(Worker):
         for env_id, reward_assign_length in enumerate(reward_assign_lengths):
             for reward_assign_step in range(2, reward_assign_length + 1):
                 rollout_rewards[-reward_assign_step][env_id] += reward[env_id]
+
+    def assign_semantic_interval_reward(
+        self,
+        stage_id: int,
+        reward_model_output: torch.Tensor,
+        policy_forward_inputs: dict[str, torch.Tensor],
+    ) -> None:
+        """Assign packet reward to transitions in its causal source-frame interval."""
+        source_frames = (
+            policy_forward_inputs["rollout_semantic_source_frame_ids"]
+            .detach()
+            .cpu()
+            .reshape(-1)
+        )
+        generations = (
+            policy_forward_inputs["rollout_semantic_episode_generations"]
+            .detach()
+            .cpu()
+            .reshape(-1)
+        )
+        versions = (
+            policy_forward_inputs["rollout_semantic_versions"]
+            .detach()
+            .cpu()
+            .reshape(-1)
+        )
+        rewards = reward_model_output.detach().cpu().reshape(-1)
+        rollout = self.rollout_results[stage_id]
+        if not rollout.rewards or not rollout.forward_inputs:
+            return
+
+        for env_id, reward in enumerate(rewards):
+            current = (
+                int(generations[env_id]),
+                int(source_frames[env_id]),
+                int(versions[env_id]),
+            )
+            previous = self._semantic_reward_previous_packets[stage_id][env_id]
+            self._semantic_reward_previous_packets[stage_id][env_id] = current
+            if previous is None:
+                continue
+            prev_generation, prev_source_frame, prev_version = previous
+            generation, source_frame, version = current
+            if (
+                generation != prev_generation
+                or version == prev_version
+                or source_frame <= prev_source_frame
+            ):
+                continue
+
+            reward_count = len(rollout.rewards)
+            forward_count = len(rollout.forward_inputs)
+            reward_offset = max(0, forward_count - reward_count)
+            candidates = []
+            for forward_index, cached_inputs in enumerate(rollout.forward_inputs):
+                reward_index = forward_index - reward_offset
+                if reward_index < 0 or reward_index >= reward_count:
+                    continue
+                cached_frames = cached_inputs.get("action_frame_ids")
+                cached_generations = cached_inputs.get(
+                    "rollout_semantic_episode_generations"
+                )
+                if cached_frames is None or cached_generations is None:
+                    continue
+                action_frame = int(cached_frames[env_id].detach().cpu().reshape(-1)[0])
+                action_generation = int(
+                    cached_generations[env_id].detach().cpu().reshape(-1)[0]
+                )
+                if (
+                    action_generation == generation
+                    and prev_source_frame < action_frame <= source_frame
+                ):
+                    candidates.append(reward_index)
+            if not candidates:
+                continue
+            selected = (
+                candidates[-1:]
+                if self.semantic_reward_assign_mode == "endpoint"
+                else candidates
+            )
+            contribution = self.reward_weight * reward / len(selected)
+            for index in selected:
+                rollout.rewards[index][env_id, -1] += contribution.to(
+                    rollout.rewards[index].dtype
+                )
 
     @Worker.timer("env/bootstrap_step")
     def bootstrap_step(self) -> list[EnvOutput]:
@@ -1224,10 +1445,15 @@ class EnvWorker(Worker):
         obs["__rlinf_semantic_observation_wallclock_s"] = metadata[
             "observation_wallclock_s"
         ]
+        target_age = None
         if mode == "train" and self._semantic_train_random_age_max_frames >= 0:
+            target_age = self._semantic_train_target_age[stage_id]
+        elif mode == "eval" and self._semantic_eval_random_age_max_frames >= 0:
+            target_age = self._semantic_eval_target_age[stage_id]
+        if target_age is not None:
             obs["__rlinf_semantic_target_age_frames"] = torch.full(
                 (metadata["frame_ids"].numel(),),
-                self._semantic_train_target_age[stage_id],
+                target_age,
                 dtype=torch.int64,
             )
         if task_ids is not None:
@@ -1330,27 +1556,23 @@ class EnvWorker(Worker):
         random_max = self._semantic_eval_random_age_max_frames
         if random_max < 0:
             return self._semantic_eval_mid_chunk_frame
-        clock = self._semantic_env_clock.get(("eval", stage_id))
-        if clock is None:
-            current_frames = torch.zeros(
-                self.eval_num_envs_per_stage, dtype=torch.int64
-            )
-        else:
-            current_frames = clock["frame_ids"]
-        next_frames = current_frames + int(self.model_cfg.num_action_chunks)
-        ages = eval_semantic_age_frames(
-            next_frames,
+        rollout_step = self._semantic_eval_rollout_step[stage_id]
+        stream_id = self._rank * self.stage_num + stage_id
+        age = eval_semantic_age_frame(
+            rollout_step,
+            stream_id,
             self._semantic_eval_random_age_min_frames,
             random_max,
             self._semantic_eval_random_age_seed,
         )
-        publish_frames = {int(self.model_cfg.num_action_chunks) - age for age in ages}
-        if len(publish_frames) != 1:
-            raise RuntimeError(
-                "Random-age evaluation requires synchronized simulator frames within "
-                f"an env batch, got next_frames={next_frames.tolist()} ages={ages}"
-            )
-        return publish_frames.pop()
+        self._semantic_eval_rollout_step[stage_id] += 1
+        self._semantic_eval_target_age[stage_id] = age
+        return int(self.model_cfg.num_action_chunks) - age
+
+    def _reset_semantic_eval_schedule(self) -> None:
+        """Restart deterministic semantic-age streams for every validation call."""
+        self._semantic_eval_rollout_step = [0 for _ in range(self.stage_num)]
+        self._semantic_eval_target_age = [0 for _ in range(self.stage_num)]
 
     def _semantic_train_publish_frame_for_next_boundary(self, stage_id: int) -> int:
         random_max = self._semantic_train_random_age_max_frames
@@ -1486,31 +1708,62 @@ class EnvWorker(Worker):
                             env_output.intervene_flags,
                         )
 
+                    rollout_result = None
+                    if self.use_shared_semantic_reward:
+                        rollout_result = self.recv_from(
+                            group_name=self.cfg.rollout.group_name,
+                            channel=input_channel,
+                            tag="train_rollout_results",
+                            route_key=(
+                                stage_id if not self.env_decoupled_mode else None
+                            ),
+                            batch_size=self.train_batch_size,
+                            merge_fn=RolloutResult.merge_rollout_results,
+                            infer_batch_size_fn=self._infer_rollout_batch_size,
+                            decoupled_mode=self.env_decoupled_mode,
+                        )
+
                     reward_model_output = None
-                    if reward_channel is not None and chunk_step_idx != 0:
+                    if reward_channel is not None and (
+                        chunk_step_idx != 0 or self.use_shared_semantic_reward
+                    ):
                         reward_model_output = self.get_reward_model_output(
                             env_output,
                             send_channel=reward_channel,
                             recv_channel=input_channel,
                             stage_id=stage_id,
+                            policy_forward_inputs=(
+                                rollout_result.forward_inputs
+                                if rollout_result is not None
+                                else None
+                            ),
                         )
                         if reward_model_output is not None:
                             env_metrics["reward_model_output"].append(
                                 reward_model_output.detach().float().reshape(-1).cpu()
                             )
 
-                    rollout_result = self.recv_from(
-                        group_name=self.cfg.rollout.group_name,
-                        channel=input_channel,
-                        tag="train_rollout_results",
-                        route_key=stage_id if not self.env_decoupled_mode else None,
-                        batch_size=self.train_batch_size,
-                        merge_fn=RolloutResult.merge_rollout_results,
-                        infer_batch_size_fn=self._infer_rollout_batch_size,
-                        decoupled_mode=self.env_decoupled_mode,
-                    )
+                    if rollout_result is None:
+                        rollout_result = self.recv_from(
+                            group_name=self.cfg.rollout.group_name,
+                            channel=input_channel,
+                            tag="train_rollout_results",
+                            route_key=(
+                                stage_id if not self.env_decoupled_mode else None
+                            ),
+                            batch_size=self.train_batch_size,
+                            merge_fn=RolloutResult.merge_rollout_results,
+                            infer_batch_size_fn=self._infer_rollout_batch_size,
+                            decoupled_mode=self.env_decoupled_mode,
+                        )
                     rewards = self.compute_bootstrap_rewards(
-                        env_output, rollout_result.bootstrap_values, reward_model_output
+                        env_output,
+                        rollout_result.bootstrap_values,
+                        (
+                            None
+                            if self.use_shared_semantic_reward
+                            else reward_model_output
+                        ),
                     )
                     chunk_step_result = ChunkStepResult(
                         actions=rollout_result.forward_inputs.get("action", None),
@@ -1534,6 +1787,15 @@ class EnvWorker(Worker):
 
                     self.rollout_results[stage_id].append_step_result(chunk_step_result)
                     if (
+                        self.use_shared_semantic_reward
+                        and reward_model_output is not None
+                    ):
+                        self.assign_semantic_interval_reward(
+                            stage_id,
+                            reward_model_output,
+                            rollout_result.forward_inputs,
+                        )
+                    elif (
                         self.reward_mode == "history_buffer"
                         and self.history_reward_assign
                         and reward_model_output is not None
@@ -1602,6 +1864,19 @@ class EnvWorker(Worker):
                         env_output.intervene_flags,
                     )
 
+                rollout_result = None
+                if self.use_shared_semantic_reward:
+                    rollout_result = self.recv_from(
+                        group_name=self.cfg.rollout.group_name,
+                        channel=input_channel,
+                        tag="train_rollout_results",
+                        route_key=stage_id if not self.env_decoupled_mode else None,
+                        batch_size=self.train_batch_size,
+                        merge_fn=RolloutResult.merge_rollout_results,
+                        infer_batch_size_fn=self._infer_rollout_batch_size,
+                        decoupled_mode=self.env_decoupled_mode,
+                    )
+
                 reward_model_output = None
                 if reward_channel is not None:
                     last_run = epoch == self.rollout_epoch - 1
@@ -1611,23 +1886,31 @@ class EnvWorker(Worker):
                         recv_channel=input_channel,
                         stage_id=stage_id,
                         last_run=last_run,
+                        policy_forward_inputs=(
+                            rollout_result.forward_inputs
+                            if rollout_result is not None
+                            else None
+                        ),
                     )
                     if reward_model_output is not None:
                         env_metrics["reward_model_output"].append(
                             reward_model_output.detach().float().reshape(-1).cpu()
                         )
-                rollout_result = self.recv_from(
-                    group_name=self.cfg.rollout.group_name,
-                    channel=input_channel,
-                    tag="train_rollout_results",
-                    route_key=stage_id if not self.env_decoupled_mode else None,
-                    batch_size=self.train_batch_size,
-                    merge_fn=RolloutResult.merge_rollout_results,
-                    infer_batch_size_fn=self._infer_rollout_batch_size,
-                    decoupled_mode=self.env_decoupled_mode,
-                )
+                if rollout_result is None:
+                    rollout_result = self.recv_from(
+                        group_name=self.cfg.rollout.group_name,
+                        channel=input_channel,
+                        tag="train_rollout_results",
+                        route_key=stage_id if not self.env_decoupled_mode else None,
+                        batch_size=self.train_batch_size,
+                        merge_fn=RolloutResult.merge_rollout_results,
+                        infer_batch_size_fn=self._infer_rollout_batch_size,
+                        decoupled_mode=self.env_decoupled_mode,
+                    )
                 rewards = self.compute_bootstrap_rewards(
-                    env_output, rollout_result.bootstrap_values, reward_model_output
+                    env_output,
+                    rollout_result.bootstrap_values,
+                    None if self.use_shared_semantic_reward else reward_model_output,
                 )
                 final_actions = rollout_result.forward_inputs.get("action", None)
                 final_forward_inputs = rollout_result.forward_inputs
@@ -1656,7 +1939,13 @@ class EnvWorker(Worker):
                     rewards=rewards,
                 )
                 self.rollout_results[stage_id].append_step_result(chunk_step_result)
-                if (
+                if self.use_shared_semantic_reward and reward_model_output is not None:
+                    self.assign_semantic_interval_reward(
+                        stage_id,
+                        reward_model_output,
+                        rollout_result.forward_inputs,
+                    )
+                elif (
                     self.reward_mode == "history_buffer"
                     and self.history_reward_assign
                     and reward_model_output is not None
@@ -1723,6 +2012,7 @@ class EnvWorker(Worker):
     @Worker.timer("evaluate")
     def evaluate(self, input_channel: Channel, rollout_channel: Channel):
         eval_metrics = defaultdict(list)
+        self._reset_semantic_eval_schedule()
         for eval_rollout_epoch in range(self.eval_rollout_epoch):
             if not self.cfg.env.eval.auto_reset or eval_rollout_epoch == 0:
                 for stage_id in range(self.stage_num):

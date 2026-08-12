@@ -100,6 +100,9 @@ SupportedModel.CMA_POLICY = SupportedModel.register("cma", force=True)
 SupportedModel.LINGBOTVLA = SupportedModel.register("lingbotvla", force=True)
 SupportedModel.ABOT_M0 = SupportedModel.register("abot_m0", force=True)
 SupportedModel.RESNET_REWARD = SupportedModel.register("resnet", force=True)
+SupportedModel.SHARED_SEMANTIC_REWARD = SupportedModel.register(
+    "shared_semantic_temporal", force=True
+)
 SupportedModel.CFG_MODEL = SupportedModel.register("cfg_model", force=True)
 SupportedModel.RECAP_VALUE_MODEL = SupportedModel.register(
     "recap_value_model", force=True
@@ -134,6 +137,7 @@ EMBODIED_MODEL = set(
         SupportedModel.LINGBOTVLA,
         SupportedModel.ABOT_M0,
         SupportedModel.RESNET_REWARD,
+        SupportedModel.SHARED_SEMANTIC_REWARD,
         SupportedModel.GR00T_N1D6,
         SupportedModel.GR00T_N1D7,
         SupportedModel.CFG_MODEL,

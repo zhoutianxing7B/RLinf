@@ -1,0 +1,85 @@
+# @package _global_
+
+# Add this group to the existing semantic-server PPO config with:
+#   +shared_semantic_reward=enabled
+# The reward worker consumes rollout-cached tokens and never loads a VLM.
+cluster:
+  component_placement:
+    reward: ${oc.env:REWARD_GPU_PLACEMENT,1-3}
+
+runner:
+  logger:
+    experiment_name: ${oc.env:PPO_EXPERIMENT_NAME,libero_spatial_ditonly_ppo_shared_semantic_reward}
+
+actor:
+  model:
+    rl_head_config:
+      # Action-private adapter A_pi: condition shared tokens on packet age and
+      # executed action history before the DiT.
+      semantic_stale_adapter_enabled: true
+      semantic_stale_adapter_threshold_frames: 0
+      initialize_action_history_length: ${oc.decode:${oc.env:INITIALIZE_ACTION_HISTORY_LENGTH,4}}
+      trainable_modules:
+        - "action_head.model"
+        - "action_head.packet_age_adapter"
+        - "action_head.action_history_adapter"
+        - "action_head.stale_semantic_adapter"
+        - "action_head.stale_semantic_token_adapter"
+        - "action_head.value_head"
+
+reward:
+  use_reward_model: true
+  group_name: "RewardGroup"
+  reward_mode: history_buffer
+  history_reward_assign: false
+  semantic_interval_assign: ${oc.env:SEMANTIC_REWARD_ASSIGN,endpoint}
+  reward_weight: ${oc.decode:${oc.env:SEMANTIC_REWARD_WEIGHT,1.0}}
+  env_reward_weight: ${oc.decode:${oc.env:ENV_REWARD_WEIGHT,0.0}}
+  enable_offload: false
+  model:
+    model_type: "shared_semantic_temporal"
+    model_path: ${oc.decode:${oc.env:SHARED_REWARD_MODEL_PATH,null}}
+    require_checkpoint: ${oc.decode:${oc.env:SHARED_REWARD_REQUIRE_CHECKPOINT,true}}
+    precision: "bf16"
+    history_size: ${oc.decode:${oc.env:SEMANTIC_REWARD_HISTORY,4}}
+    history_buffer_name: "semantic_window"
+    token_dim: 2048
+    adapter_dim: 256
+    temporal_dim: 256
+    task_dim: 64
+    num_tasks: 10
+    state_dim: 132
+    action_history_length: ${oc.decode:${oc.env:INITIALIZE_ACTION_HISTORY_LENGTH,4}}
+    action_dim: 132
+    num_embodiments: 32
+    require_action_condition: true
+    age_hidden_dim: 64
+    age_normalization_frames: 8
+    age_normalization_s: 0.4
+    head_hidden_dim: 128
+    progress_weight: 0.0
+    completion_weight: 1.0
+    failure_weight: 0.0
+    uncertainty_penalty: 0.0
+    uncertainty_loss_weight: 0.0
+    interval_reward: 0.0
+    history_buffers:
+      semantic_window:
+        history_size: ${reward.model.history_size}
+        min_history_size: 1
+        input_interval: 1
+        input_on_done: true
+        history_keys:
+          - semantic_tokens
+          - semantic_attention_mask
+          - semantic_source_frame_ids
+          - semantic_episode_generations
+          - semantic_versions
+          - semantic_source_wallclock_s
+          - semantic_completed_wallclock_s
+          - action_frame_ids
+          - action_wallclock_s
+          - packet_age_s
+          - action_states
+          - action_history
+          - embodiment_ids

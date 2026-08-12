@@ -2359,6 +2359,12 @@ class Gr00tN1d7SemanticBackbonePolicy:
                 "episode_generations": [
                     packet["episode_generation"] for packet in packets
                 ],
+                "source_wallclock_s": [
+                    packet["source_wallclock_s"] for packet in packets
+                ],
+                "completed_wallclock_s": [
+                    packet["completed_wallclock_s"] for packet in packets
+                ],
                 "semantic_versions": [packet["version"] for packet in packets],
             },
         }

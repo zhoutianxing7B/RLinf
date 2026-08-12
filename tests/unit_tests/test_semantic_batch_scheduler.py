@@ -1706,6 +1706,7 @@ def test_random_age_eval_is_bounded_and_reproducible(monkeypatch):
         "env_ids": torch.tensor([1]),
         "frame_ids": torch.tensor([16]),
         "episode_generations": torch.tensor([0]),
+        "target_age_frames": torch.tensor([4]),
     }
     captured = []
 
@@ -1725,6 +1726,36 @@ def test_random_age_eval_is_bounded_and_reproducible(monkeypatch):
     assert first_source == captured[0]["source_frame_ids"]
     assert 0 <= first_age_s.item() * 20 <= 6
     torch.testing.assert_close(first_age_s, second_age_s)
+
+
+def test_random_age_eval_uses_one_reproducible_age_per_chunk():
+    def build_worker():
+        worker = object.__new__(EnvWorker)
+        worker._semantic_eval_random_age_min_frames = 0
+        worker._semantic_eval_random_age_max_frames = 6
+        worker._semantic_eval_random_age_seed = 2026
+        worker._semantic_eval_mid_chunk_frame = 10
+        worker._semantic_eval_rollout_step = [0]
+        worker._semantic_eval_target_age = [0]
+        worker._rank = 1
+        worker.stage_num = 1
+        worker.model_cfg = SimpleNamespace(num_action_chunks=16)
+        return worker
+
+    first = build_worker()
+    second = build_worker()
+    first_frames = [
+        first._semantic_eval_publish_frame_for_next_boundary(0) for _ in range(14)
+    ]
+    second_frames = [
+        second._semantic_eval_publish_frame_for_next_boundary(0) for _ in range(14)
+    ]
+    ages = [16 - frame for frame in first_frames]
+
+    assert first_frames == second_frames
+    assert set(ages).issubset(set(range(7)))
+    assert len(set(ages)) > 1
+    assert first._semantic_eval_target_age[0] == ages[-1]
 
 
 def test_action_history_keeps_latest_executed_frames_from_chunk():
@@ -2064,3 +2095,15 @@ def test_env_semantic_publisher_forwards_priority():
 
     assert published["metadata"]["semantic_priority"] == 1
     assert published["metadata"]["frame_ids"] == [16, 16]
+
+
+def test_eval_semantic_schedule_resets_between_validations():
+    worker = object.__new__(EnvWorker)
+    worker.stage_num = 2
+    worker._semantic_eval_rollout_step = [17, 23]
+    worker._semantic_eval_target_age = [4, 6]
+
+    worker._reset_semantic_eval_schedule()
+
+    assert worker._semantic_eval_rollout_step == [0, 0]
+    assert worker._semantic_eval_target_age == [0, 0]
