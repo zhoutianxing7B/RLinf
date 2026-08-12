@@ -7,11 +7,13 @@
 - 工作仓库：`/vepfs-mlp2/c20250301/240403026/async_vla/RLinf`
 - 当前分支：`feat/async-ppo`
 - 远端：`https://github.com/zhoutianxing7B/RLinf.git`
-- 基线：`origin/main`，当前 HEAD 为 `573c9394`
-- 当前状态：功能修改仍在工作树中，尚未 commit，也未 push
+- 当前本地 HEAD：`0d46a127`
+- 原开发基线：`573c9394`
+- 当前远端 `origin/main`：`66976468`（2026-08-12 被 force-update）
+- 当前状态：功能已保存在本地提交中，尚未 rebase 到新 `origin/main`，也未 push
 - 注意：本实现不在 `/vepfs-mlp2/c20250301/240403026/async_ppo` 工作树中
 
-当前分支的已提交历史与 `origin/main` 一致。所有下文描述的功能均来自当前未提交修改及新增文件，交接、提交或迁移时必须同时包含 tracked 和 untracked 文件。
+当前分支与新 `origin/main` 已分叉：共同祖先为 `d6e69917`，本地侧 5 个提交，远端侧 19 个提交。远端包含 `rlinf/data` 等大规模目录重构，不能用普通 Pull 直接合并。迁移时应先保留当前分支，再将 feature commits rebase/cherry-pick 到新 main，并重新运行全部相关测试。
 
 ## 2. 要解决的问题
 
@@ -194,7 +196,7 @@ http://localhost:6010/#timeseries
 
 ## 8. 交接与提交注意事项
 
-1. 当前分支尚未提交。提交前先检查 `git status --short`，尤其不能遗漏新增文件。
+1. 当前功能已经保存在本地提交中，但尚未推送；迁移前仍需用 `git status --short` 确认没有遗漏的新修改。
 2. 不要把旧的 `codex/*` 备份分支或外部 `async_ppo` 工作树混入本分支。
 3. 不要恢复已经删除的 GRPO、replay、固定三步刷新等实验性路径。
 4. PPO 算法保持 RLinf 原生 actor-critic；解耦只发生在 VLM 服务、语义缓存和 DiT 输入边界。
