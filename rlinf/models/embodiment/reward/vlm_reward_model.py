@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any, Optional
 
 import numpy as np
@@ -45,6 +46,23 @@ from rlinf.models.embodiment.reward.vlm_reward_utils.reward_parser import (
     get_reward_parser,
 )
 from rlinf.utils.lora_adapter import load_adapter_onto_model
+
+
+def _episode_done_mask(
+    dones: Any, expected_shape: torch.Size, *, what: str
+) -> torch.Tensor:
+    """Flatten ``dones`` to a 1-D bool mask or raise on a shape mismatch.
+
+    Silently skipping reset when the mask does not match would leak
+    potential / success state across episodes.
+    """
+    done_mask = torch.as_tensor(dones).reshape(-1).bool().cpu()
+    if done_mask.shape != expected_shape:
+        raise ValueError(
+            f"{what}: dones shape {tuple(done_mask.shape)} does not match "
+            f"batch {tuple(expected_shape)}; refusing to skip episode reset"
+        )
+    return done_mask
 
 
 class ScalarPotentialHead(torch.nn.Module):
@@ -81,13 +99,11 @@ class VLMRewardModel(BaseRewardModel):
         self.lora_path = self.cfg.get("lora_path")
         self.gt_success_bonus = float(cfg.get("gt_success_bonus", 0.0))
         self.inference_mode = str(cfg.get("inference_mode", "generate"))
-        self.scalar_head_path = cfg.get("scalar_head_path")
 
         self.dtype = torch_dtype_from_precision(cfg.precision)
 
         self.setup_processor()
         self.setup_model()
-        self.setup_scalar_head()
 
         self.setup_input_builder()
         self.setup_reward_parser()
@@ -152,26 +168,6 @@ class VLMRewardModel(BaseRewardModel):
 
         self._model.eval()
 
-    def setup_scalar_head(self) -> None:
-        """Load the scalar potential head when ``scalar_head`` inference is used."""
-        self.scalar_head: ScalarPotentialHead | None = None
-        if self.inference_mode != "scalar_head":
-            return
-        if not self.scalar_head_path:
-            raise ValueError("scalar_head_path is required for scalar_head inference")
-        payload = torch.load(
-            self.scalar_head_path, map_location="cpu", weights_only=False
-        )
-        config = payload["config"]
-        self.scalar_head = ScalarPotentialHead(
-            int(config["input_dim"]),
-            int(config["hidden_dim"]),
-            float(config["dropout"]),
-        )
-        self.scalar_head.load_state_dict(payload["model_state_dict"])
-        self.scalar_head.to(device=self._model.device, dtype=torch.float32)
-        self.scalar_head.eval()
-
     @torch.no_grad()
     def extract_prompt_features(
         self, batched_inputs: dict[str, torch.Tensor]
@@ -197,17 +193,6 @@ class VLMRewardModel(BaseRewardModel):
         return hidden[batch_indices, last_positions].float()
 
     @torch.no_grad()
-    def compute_scalar_potential(
-        self, batched_inputs: dict[str, torch.Tensor]
-    ) -> torch.Tensor:
-        """Return a sigmoid-bounded potential from the trained scalar head."""
-        if self.scalar_head is None:
-            raise RuntimeError("Scalar potential head is not initialized")
-        features = self.extract_prompt_features(batched_inputs)
-        logits = self.scalar_head(features)
-        return torch.sigmoid(logits)
-
-    @torch.no_grad()
     def compute_reward(
         self,
         observations: Any,
@@ -215,10 +200,7 @@ class VLMRewardModel(BaseRewardModel):
         batched_inputs = self.input_builder.build_inputs(
             observations, self._model.device
         )
-        if self.inference_mode == "scalar_head":
-            rewards = self.compute_scalar_potential(batched_inputs)
-        else:
-            rewards = self._generate_and_parse_rewards(batched_inputs)
+        rewards = self._generate_and_parse_rewards(batched_inputs)
         del batched_inputs
         return self.apply_gt_success_bonus(rewards, observations)
 
@@ -234,6 +216,8 @@ class BufferedVLMRewardModel(VLMRewardModel):
         self.potential_ema_alpha: float = float(cfg.get("potential_ema_alpha", 0.2))
         self.potential_clip: float = float(cfg.get("potential_clip", 0.0))
         self._previous_potentials: torch.Tensor | None = None
+        self.scalar_head_path = cfg.get("scalar_head_path")
+        self.scalar_head: ScalarPotentialHead | None = None
         # Success-bonus path (optional second adapter + binary parser).
         self.success_lora_path = cfg.get("success_lora_path")
         self.success_threshold = float(cfg.get("success_threshold", 0.95))
@@ -276,14 +260,51 @@ class BufferedVLMRewardModel(VLMRewardModel):
             "do_sample": False,
             "temperature": 0.0,
         }
+        self.setup_scalar_head()
+
+    def setup_scalar_head(self) -> None:
+        """Load the scalar potential head when ``scalar_head`` inference is used."""
+        if self.inference_mode != "scalar_head":
+            return
+        if not self.scalar_head_path:
+            raise ValueError("scalar_head_path is required for scalar_head inference")
+        payload = torch.load(
+            self.scalar_head_path, map_location="cpu", weights_only=False
+        )
+        config = payload["config"]
+        self.scalar_head = ScalarPotentialHead(
+            int(config["input_dim"]),
+            int(config["hidden_dim"]),
+            float(config["dropout"]),
+        )
+        self.scalar_head.load_state_dict(payload["model_state_dict"])
+        self.scalar_head.to(device=self._model.device, dtype=torch.float32)
+        self.scalar_head.eval()
+
+    @torch.no_grad()
+    def compute_scalar_potential(
+        self, batched_inputs: dict[str, torch.Tensor]
+    ) -> torch.Tensor:
+        """Return a sigmoid-bounded potential from the trained scalar head."""
+        if self.scalar_head is None:
+            raise RuntimeError("Scalar potential head is not initialized")
+        features = self.extract_prompt_features(batched_inputs)
+        logits = self.scalar_head(features)
+        return torch.sigmoid(logits)
 
     def setup_model(self) -> None:
         super().setup_model()
-        if self.success_lora_path:
-            self._model = load_adapter_onto_model(
-                self._model, self.success_lora_path, adapter_name="success"
+        if not self.success_lora_path:
+            return
+        if not self.lora_path:
+            raise ValueError(
+                "success_lora_path requires a primary lora_path so the success "
+                "adapter can be attached as a second Peft adapter"
             )
-            self._success_adapter_name = "success"
+        self._model = load_adapter_onto_model(
+            self._model, self.success_lora_path, adapter_name="success"
+        )
+        self._success_adapter_name = "success"
 
     def setup_input_builder(self) -> None:
         self.input_builder = get_input_builder(
@@ -404,27 +425,40 @@ class BufferedVLMRewardModel(VLMRewardModel):
                 micro_history_input,
             )
             if success_input_ids:
-                if self._success_adapter_name is not None:
-                    self._model.set_adapter(self._success_adapter_name)
-                prompt_length = success_inputs["input_ids"].shape[-1]
-                success_output_ids = self._model.generate(
-                    **success_inputs,
-                    **self.success_gen_kwargs,
+                success_chunk[success_input_ids] = self._score_success_outputs(
+                    success_inputs
                 )
-                success_outputs = self._processor.batch_decode(
-                    success_output_ids[..., prompt_length:],
-                    skip_special_tokens=True,
-                )
-                assert self.success_reward_parser is not None
-                success_chunk[success_input_ids] = (
-                    self.success_reward_parser.parse_rewards(success_outputs)
-                )
-                if self._success_adapter_name is not None:
-                    self._model.set_adapter("default")
-                del success_output_ids
-                del success_outputs
                 del success_inputs
         return reward_chunk, valid_chunk, success_chunk
+
+    def _run_on_success_adapter(self, fn: Callable[[], torch.Tensor]) -> torch.Tensor:
+        """Run ``fn`` on the success adapter and always restore ``default``."""
+        if self._success_adapter_name is not None:
+            self._model.set_adapter(self._success_adapter_name)
+        try:
+            return fn()
+        finally:
+            if self._success_adapter_name is not None:
+                self._model.set_adapter("default")
+
+    def _score_success_outputs(self, success_inputs: dict[str, Any]) -> torch.Tensor:
+        """Generate success labels on the success adapter, then restore default."""
+        assert self.success_reward_parser is not None
+
+        def _generate_and_parse() -> torch.Tensor:
+            prompt_length = success_inputs["input_ids"].shape[-1]
+            success_output_ids = self._model.generate(
+                **success_inputs,
+                **self.success_gen_kwargs,
+            )
+            success_outputs = self._processor.batch_decode(
+                success_output_ids[..., prompt_length:],
+                skip_special_tokens=True,
+            )
+            del success_output_ids
+            return self.success_reward_parser.parse_success_scores(success_outputs)
+
+        return self._run_on_success_adapter(_generate_and_parse)
 
     def compute_reward(
         self,
@@ -472,17 +506,24 @@ class BufferedVLMRewardModel(VLMRewardModel):
     def apply_model_success_bonus(
         self,
         rewards: torch.Tensor,
-        success_probabilities: torch.Tensor,
+        success_scores: torch.Tensor,
         valid_mask: torch.Tensor,
         dones: Any = None,
     ) -> torch.Tensor:
-        """Add a one-shot VLM success bonus and reset state at episode end."""
+        """Add a one-shot VLM success bonus and reset state at episode end.
+
+        ``success_scores`` must be label/probability values in ``[0, 1]``
+        (NaN = invalid), not parser reward scalars.
+        """
         if self._success_fired is None or self._success_fired.shape != rewards.shape:
             self._success_fired = torch.zeros_like(rewards, dtype=torch.bool)
             self._success_streak = torch.zeros_like(rewards, dtype=torch.int32)
         if self._success_streak is None:
             raise RuntimeError("success streak state was not initialized")
-        above_threshold = valid_mask & (success_probabilities >= self.success_threshold)
+        finite_scores = torch.isfinite(success_scores)
+        above_threshold = (
+            valid_mask & finite_scores & (success_scores >= self.success_threshold)
+        )
         self._success_streak[valid_mask & ~above_threshold] = 0
         self._success_streak[above_threshold] += 1
         triggered = (
@@ -493,10 +534,11 @@ class BufferedVLMRewardModel(VLMRewardModel):
         rewards = rewards + triggered.to(rewards.dtype) * self.success_bonus
         self._success_fired |= triggered
         if dones is not None:
-            done_mask = torch.as_tensor(dones).reshape(-1).bool().cpu()
-            if done_mask.shape == self._success_fired.shape:
-                self._success_fired[done_mask] = False
-                self._success_streak[done_mask] = 0
+            done_mask = _episode_done_mask(
+                dones, self._success_fired.shape, what="apply_model_success_bonus"
+            )
+            self._success_fired[done_mask] = False
+            self._success_streak[done_mask] = 0
         return rewards
 
     def potential_differences(
@@ -527,7 +569,8 @@ class BufferedVLMRewardModel(VLMRewardModel):
         previous[valid_mask] = smoothed[valid_mask]
 
         if dones is not None:
-            done_mask = torch.as_tensor(dones).reshape(-1).bool().cpu()
-            if done_mask.shape == previous.shape:
-                previous[done_mask] = torch.nan
+            done_mask = _episode_done_mask(
+                dones, previous.shape, what="potential_differences"
+            )
+            previous[done_mask] = torch.nan
         return rewards

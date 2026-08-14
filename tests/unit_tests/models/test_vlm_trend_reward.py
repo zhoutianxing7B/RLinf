@@ -14,11 +14,11 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from rlinf.models.embodiment.reward.vlm_reward_model import (
     BufferedVLMRewardModel,
-    VLMRewardModel,
 )
 from rlinf.models.embodiment.reward.vlm_reward_utils.input_builder import (
     VLMTrendRewardInputBuilder,
@@ -42,7 +42,7 @@ class _IdentityScalarHead:
 
 
 def test_compute_scalar_potential_uses_last_nonpadding_token() -> None:
-    model = object.__new__(VLMRewardModel)
+    model = object.__new__(BufferedVLMRewardModel)
     hidden = torch.zeros(2, 4, 1)
     hidden[0, 1, 0] = -2.0
     hidden[1, 3, 0] = 2.0
@@ -187,6 +187,84 @@ def test_binary_digit_parser_uses_sparse_rewards():
         rewards,
         torch.tensor([1.0, 0.0, 1.0, 0.0, 0.0]),
     )
+
+
+def test_binary_digit_parser_success_scores_ignore_reward_scaling():
+    parser = VLMTrendBinaryDigitRewardParser(positive_reward=0.5, negative_reward=-1.0)
+
+    scores = parser.parse_success_scores(["1", "0", "answer: 1", "unclear", "10"])
+    rewards = parser.parse_rewards(["1", "0"])
+
+    torch.testing.assert_close(scores[:3], torch.tensor([1.0, 0.0, 1.0]))
+    assert torch.isnan(scores[3]).item()
+    torch.testing.assert_close(rewards, torch.tensor([0.5, -1.0]))
+
+
+def test_done_shape_mismatch_raises_on_potential_and_success() -> None:
+    model = _potential_model()
+    model.success_threshold = 0.8
+    model.success_bonus = 1.0
+    model.success_confirmation_windows = 1
+    model._success_fired = None
+    model._success_streak = None
+    valid = torch.tensor([True, True])
+
+    with pytest.raises(ValueError, match="potential_differences"):
+        model.potential_differences(
+            torch.tensor([0.2, 0.8]), valid, dones=torch.tensor([True])
+        )
+    with pytest.raises(ValueError, match="apply_model_success_bonus"):
+        model.apply_model_success_bonus(
+            torch.zeros(2),
+            torch.tensor([0.9, 0.9]),
+            valid,
+            dones=torch.tensor([True]),
+        )
+
+
+def test_invalid_success_score_does_not_trigger_bonus() -> None:
+    model = _potential_model()
+    model.success_threshold = 0.95
+    model.success_bonus = 1.0
+    model.success_confirmation_windows = 1
+    model._success_fired = None
+    model._success_streak = None
+    valid = torch.tensor([True])
+
+    scaled_reward_as_score = model.apply_model_success_bonus(
+        torch.zeros(1), torch.tensor([0.5]), valid
+    )
+    nan_score = model.apply_model_success_bonus(
+        torch.zeros(1), torch.tensor([float("nan")]), valid
+    )
+    label_score = model.apply_model_success_bonus(
+        torch.zeros(1), torch.tensor([1.0]), valid
+    )
+
+    torch.testing.assert_close(scaled_reward_as_score, torch.zeros(1))
+    torch.testing.assert_close(nan_score, torch.zeros(1))
+    torch.testing.assert_close(label_score, torch.ones(1))
+
+
+def test_success_adapter_restored_after_error() -> None:
+    class _AdapterModel:
+        def __init__(self) -> None:
+            self.adapter = "default"
+
+        def set_adapter(self, name: str) -> None:
+            self.adapter = name
+
+    model = object.__new__(BufferedVLMRewardModel)
+    model._success_adapter_name = "success"
+    model._model = _AdapterModel()
+
+    def _boom() -> torch.Tensor:
+        assert model._model.adapter == "success"
+        raise RuntimeError("generate failed")
+
+    with pytest.raises(RuntimeError, match="generate failed"):
+        model._run_on_success_adapter(_boom)
+    assert model._model.adapter == "default"
 
 
 def test_terminal_success_builder_matches_sft_prompt(monkeypatch):

@@ -46,6 +46,18 @@ class BaseRewardParser:
     ) -> torch.Tensor:  # pragma: no cover - tiny wrapper
         raise NotImplementedError
 
+    def parse_success_scores(self, outputs: list[str]) -> torch.Tensor:
+        """Return per-sample success scores in ``[0, 1]``, not reward scalars.
+
+        Invalid / unparseable outputs must be NaN so they do not trigger a
+        success bonus. Reward scaling (``positive_reward`` etc.) stays in
+        ``parse_rewards`` and must not be reused as a probability.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not provide success scores; use a "
+            "parser that maps labels independently of reward scaling."
+        )
+
 
 def _extract_json_object(text: str) -> dict[str, Any] | None:
     text = text.strip()
@@ -163,15 +175,33 @@ class VLMTrendBinaryDigitRewardParser(BaseRewardParser):
         self.negative_reward = float(negative_reward)
         self.invalid_reward = float(invalid_reward)
 
+    @staticmethod
+    def _trailing_binary_digit(output: str) -> str | None:
+        labels = re.findall(r"(?<!\d)([01])(?!\d)", str(output).strip())
+        return labels[-1] if labels else None
+
     def parse_rewards(self, outputs: list[str]) -> torch.Tensor:
         """Map a trailing ``1`` to the success reward and ``0`` to non-success."""
         rewards = []
         for output in outputs:
-            labels = re.findall(r"(?<!\d)([01])(?!\d)", str(output).strip())
-            if labels and labels[-1] == "1":
+            digit = self._trailing_binary_digit(output)
+            if digit == "1":
                 rewards.append(self.positive_reward)
-            elif labels and labels[-1] == "0":
+            elif digit == "0":
                 rewards.append(self.negative_reward)
             else:
                 rewards.append(self.invalid_reward)
         return torch.tensor(rewards, dtype=torch.float32)
+
+    def parse_success_scores(self, outputs: list[str]) -> torch.Tensor:
+        """Map a trailing ``1``/``0`` to ``1.0``/``0.0``; invalid → NaN."""
+        scores = []
+        for output in outputs:
+            digit = self._trailing_binary_digit(output)
+            if digit == "1":
+                scores.append(1.0)
+            elif digit == "0":
+                scores.append(0.0)
+            else:
+                scores.append(float("nan"))
+        return torch.tensor(scores, dtype=torch.float32)
