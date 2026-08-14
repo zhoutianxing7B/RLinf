@@ -16,13 +16,21 @@ import torch.nn as nn
 
 
 class ValueHead(nn.Module):
+    """Shared MLP head for scalar outputs (PPO critic, VLM potential, …).
+
+    PPO critics keep the historical defaults (GELU, no input norm, no dropout).
+    Other uses opt in via ``activation``, ``use_input_norm``, and ``dropout``.
+    """
+
     def __init__(
         self,
         input_dim: int,
         hidden_sizes=(512, 128),
         output_dim: int = 1,
-        activation: str = "gelu",  # 'relu' or 'gelu'
+        activation: str = "gelu",  # 'relu', 'gelu', 'tanh', or 'silu'
         bias_last: bool = False,
+        dropout: float = 0.0,
+        use_input_norm: bool = False,
     ):
         super().__init__()
 
@@ -35,19 +43,29 @@ class ValueHead(nn.Module):
             act = nn.GELU
         elif activation.lower() == "tanh":
             act = nn.Tanh
+        elif activation.lower() == "silu":
+            act = nn.SiLU
         else:
             raise ValueError(f"Unsupported activation: {activation}")
+
+        if use_input_norm:
+            layers.append(nn.LayerNorm(input_dim))
 
         for h in hidden_sizes:
             layers.append(nn.Linear(in_dim, h))
             layers.append(act())
+            if dropout > 0.0:
+                layers.append(nn.Dropout(dropout))
             in_dim = h
 
         layers.append(nn.Linear(in_dim, output_dim, bias=bias_last))
 
         self.mlp = nn.Sequential(*layers)
 
-        self._init_weights(activation.lower())
+        init_nonlinearity = (
+            "relu" if activation.lower() == "silu" else activation.lower()
+        )
+        self._init_weights(init_nonlinearity)
 
     def _init_weights(self, nonlinearity="relu"):
         for m in self.mlp:

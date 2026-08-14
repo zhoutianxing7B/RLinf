@@ -22,10 +22,11 @@ reward（``inference_mode=generate`` + ``vlm_trend_reward_parser``）不同。
 下面的示例默认使用 4 张 GPU（placement ``0-3``）和 ``NUM_ENVS=1024``。
 训练与 PPO 使用仓库统一入口加 YAML config-name
 （``run_vlm_sft.sh``、``run_embodiment.sh``）。Success 的数据 / teacher /
-特征 / scalar-head 步骤使用两个扁平 ``examples/reward/`` 脚本：
+特征 / scalar-head 步骤使用这些 ``examples/reward/`` 脚本：
 
 - ``preprocess_vlm_trend_success_dataset.py --mode {terminal_success,potential}``
-- ``train_vlm_trend_success_model.py --stage {teacher,extract,scalar_head}``
+- ``train_vlm_trend_success_model.py --stage {teacher,extract}``
+- ``train_vlm_trend_scalar_head.py``（共用 ``ValueHead``，YAML）
 
 经典 GAE-delta trend reward 仍用原来的扁平脚本
 ``preprocess_vlm_trend_reward_dataset.py``（后文单独章节）。
@@ -223,7 +224,8 @@ reward（``inference_mode=generate`` + ``vlm_trend_reward_parser``）不同。
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 冻结 potential LoRA，用 ``VLMRewardModel.extract_prompt_features`` 抽特征，
-再训一个小的标量头。
+再训共用的 ``ValueHead``（与 PPO critic 同一类；本流程打开 LayerNorm、SiLU
+和 dropout）。
 
 .. code-block:: bash
 
@@ -251,19 +253,15 @@ reward（``inference_mode=generate`` + ``vlm_trend_reward_parser``）不同。
        wait
      done
    done
-   python examples/reward/train_vlm_trend_success_model.py \
-       --stage scalar_head \
-       --train-pattern "${FEAT_ROOT}/train_potential_rank*.pt" \
-       --eval-pattern "${FEAT_ROOT}/eval_potential_rank*.pt" \
-       --progress-pattern "${FEAT_ROOT}/eval_progress_rank*.pt" \
-       --train-progress-pattern "${FEAT_ROOT}/train_progress_rank*.pt" \
-       --output-dir "${SCALAR_OUTPUT_ROOT}"
+   python examples/reward/train_vlm_trend_scalar_head.py
 
 
 这一步会：
 
 - 跨 GPU 分片抽取特征（``--stage extract`` + ``--rank`` / ``--world-size``），
-  再用 ``--stage scalar_head`` 训练 ``${SCALAR_OUTPUT_ROOT}/best.pt``。
+  再用 ``train_vlm_trend_scalar_head.py`` 把共用 ``ValueHead`` 训到
+  ``${SCALAR_OUTPUT_ROOT}/best.pt``（路径来自 ``FEAT_ROOT`` /
+  ``SCALAR_OUTPUT_ROOT``）。
 
 步骤 7 — 跑 PPO
 ^^^^^^^^^^^^^^^

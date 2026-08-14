@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from rlinf.models.embodiment.modules.value_head import ValueHead
 from rlinf.models.embodiment.reward.vlm_reward_model import (
     BufferedVLMRewardModel,
 )
@@ -59,6 +60,77 @@ def test_compute_scalar_potential_uses_last_nonpadding_token() -> None:
     )
 
     torch.testing.assert_close(potentials, torch.sigmoid(torch.tensor([-2.0, 2.0])))
+
+
+def test_setup_scalar_head_loads_shared_value_head(tmp_path) -> None:
+    head = ValueHead(
+        8,
+        hidden_sizes=(4,),
+        activation="silu",
+        dropout=0.1,
+        use_input_norm=True,
+        bias_last=True,
+    )
+    head.eval()
+    path = tmp_path / "best.pt"
+    torch.save(
+        {
+            "model_state_dict": head.state_dict(),
+            "config": {
+                "input_dim": 8,
+                "hidden_dim": 4,
+                "hidden_sizes": [4],
+                "dropout": 0.1,
+                "activation": "silu",
+                "use_input_norm": True,
+                "bias_last": True,
+            },
+        },
+        path,
+    )
+    model = object.__new__(BufferedVLMRewardModel)
+    torch.nn.Module.__init__(model)
+    model.inference_mode = "scalar_head"
+    model.scalar_head_path = str(path)
+    model._model = SimpleNamespace(device="cpu")
+    model.setup_scalar_head()
+    features = torch.randn(3, 8)
+    torch.testing.assert_close(model.scalar_head(features), head(features))
+
+
+def test_setup_scalar_head_accepts_legacy_net_prefix(tmp_path) -> None:
+    head = ValueHead(
+        8,
+        hidden_sizes=(4,),
+        activation="silu",
+        dropout=0.1,
+        use_input_norm=True,
+        bias_last=True,
+    )
+    head.eval()
+    path = tmp_path / "legacy.pt"
+    torch.save(
+        {
+            "model_state_dict": {
+                key.replace("mlp.", "net.", 1): value
+                for key, value in head.state_dict().items()
+            },
+            "config": {
+                "input_dim": 8,
+                "hidden_dim": 4,
+                "dropout": 0.1,
+            },
+        },
+        path,
+    )
+    model = object.__new__(BufferedVLMRewardModel)
+    torch.nn.Module.__init__(model)
+    model.inference_mode = "scalar_head"
+    model.scalar_head_path = str(path)
+    model._model = SimpleNamespace(device="cpu")
+    model.setup_scalar_head()
+    features = torch.randn(3, 8)
+    torch.testing.assert_close(model.scalar_head(features), head(features))
 
 
 def _potential_model(

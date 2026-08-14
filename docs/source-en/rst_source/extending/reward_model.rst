@@ -25,10 +25,11 @@ both need step 1; you can run the two branches in parallel after collection.
 The examples below use 4 GPUs (placement ``0-3``) and ``NUM_ENVS=1024``.
 Training and PPO use shared launchers plus YAML config-names
 (``run_vlm_sft.sh``, ``run_embodiment.sh``). Success dataset / teacher /
-feature / scalar-head steps use two flat ``examples/reward/`` scripts:
+feature / scalar-head steps use these ``examples/reward/`` scripts:
 
 - ``preprocess_vlm_trend_success_dataset.py --mode {terminal_success,potential}``
-- ``train_vlm_trend_success_model.py --stage {teacher,extract,scalar_head}``
+- ``train_vlm_trend_success_model.py --stage {teacher,extract}``
+- ``train_vlm_trend_scalar_head.py`` (shared ``ValueHead``, YAML)
 
 Classic GAE-delta trend reward stays in the original flat
 ``preprocess_vlm_trend_reward_dataset.py`` (later section).
@@ -226,7 +227,9 @@ Step 6 — Train the scalar potential head
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Freeze the potential LoRA, extract features with
-``VLMRewardModel.extract_prompt_features``, and train a small scalar head.
+``VLMRewardModel.extract_prompt_features``, and train the shared
+``ValueHead`` (same class as PPO critics; this recipe uses LayerNorm, SiLU,
+and dropout).
 
 .. code-block:: bash
 
@@ -254,19 +257,14 @@ Freeze the potential LoRA, extract features with
        wait
      done
    done
-   python examples/reward/train_vlm_trend_success_model.py \
-       --stage scalar_head \
-       --train-pattern "${FEAT_ROOT}/train_potential_rank*.pt" \
-       --eval-pattern "${FEAT_ROOT}/eval_potential_rank*.pt" \
-       --progress-pattern "${FEAT_ROOT}/eval_progress_rank*.pt" \
-       --train-progress-pattern "${FEAT_ROOT}/train_progress_rank*.pt" \
-       --output-dir "${SCALAR_OUTPUT_ROOT}"
+   python examples/reward/train_vlm_trend_scalar_head.py
 
 What this does:
 
 - Shards feature extraction across GPUs (``--stage extract`` with
-  ``--rank`` / ``--world-size``), then trains ``${SCALAR_OUTPUT_ROOT}/best.pt``
-  with ``--stage scalar_head``.
+  ``--rank`` / ``--world-size``), then trains the shared ``ValueHead`` to
+  ``${SCALAR_OUTPUT_ROOT}/best.pt`` via ``train_vlm_trend_scalar_head.py``
+  (paths come from ``FEAT_ROOT`` / ``SCALAR_OUTPUT_ROOT``).
 
 Step 7 — Run PPO
 ^^^^^^^^^^^^^^^^

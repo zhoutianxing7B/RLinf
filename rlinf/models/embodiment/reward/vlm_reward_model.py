@@ -32,6 +32,7 @@ except ImportError:
         AutoModelForVision2Seq = None
 
 from rlinf.config import torch_dtype_from_precision
+from rlinf.models.embodiment.modules.value_head import ValueHead
 from rlinf.models.embodiment.reward.base_reward_model import BaseRewardModel
 from rlinf.models.embodiment.reward.vlm_reward_utils.common import (
     apply_gt_success_bonus,
@@ -63,24 +64,6 @@ def _episode_done_mask(
             f"batch {tuple(expected_shape)}; refusing to skip episode reset"
         )
     return done_mask
-
-
-class ScalarPotentialHead(torch.nn.Module):
-    """Small scalar head trained on the final Qwen prompt representation."""
-
-    def __init__(self, input_dim: int, hidden_dim: int, dropout: float) -> None:
-        super().__init__()
-        self.net = torch.nn.Sequential(
-            torch.nn.LayerNorm(input_dim),
-            torch.nn.Linear(input_dim, hidden_dim),
-            torch.nn.SiLU(),
-            torch.nn.Dropout(dropout),
-            torch.nn.Linear(hidden_dim, 1),
-        )
-
-    def forward(self, features: torch.Tensor) -> torch.Tensor:
-        """Map prompt features of shape ``(batch, dim)`` to scalar logits."""
-        return self.net(features).squeeze(-1)
 
 
 class VLMRewardModel(BaseRewardModel):
@@ -217,7 +200,7 @@ class BufferedVLMRewardModel(VLMRewardModel):
         self.potential_clip: float = float(cfg.get("potential_clip", 0.0))
         self._previous_potentials: torch.Tensor | None = None
         self.scalar_head_path = cfg.get("scalar_head_path")
-        self.scalar_head: ScalarPotentialHead | None = None
+        self.scalar_head: ValueHead | None = None
         # Success-bonus path (optional second adapter + binary parser).
         self.success_lora_path = cfg.get("success_lora_path")
         self.success_threshold = float(cfg.get("success_threshold", 0.95))
@@ -272,12 +255,28 @@ class BufferedVLMRewardModel(VLMRewardModel):
             self.scalar_head_path, map_location="cpu", weights_only=False
         )
         config = payload["config"]
-        self.scalar_head = ScalarPotentialHead(
+        hidden_sizes = config.get("hidden_sizes")
+        if hidden_sizes is None:
+            hidden_sizes = (int(config["hidden_dim"]),)
+        self.scalar_head = ValueHead(
             int(config["input_dim"]),
-            int(config["hidden_dim"]),
-            float(config["dropout"]),
+            hidden_sizes=tuple(int(size) for size in hidden_sizes),
+            output_dim=1,
+            activation=str(config.get("activation", "silu")),
+            bias_last=bool(config.get("bias_last", True)),
+            dropout=float(config.get("dropout", 0.0)),
+            use_input_norm=bool(config.get("use_input_norm", True)),
         )
-        self.scalar_head.load_state_dict(payload["model_state_dict"])
+        state_dict = payload["model_state_dict"]
+        if any(key.startswith("net.") for key in state_dict):
+            remapped = {}
+            for key, value in state_dict.items():
+                if key.startswith("net."):
+                    remapped["mlp." + key[len("net.") :]] = value
+                else:
+                    remapped[key] = value
+            state_dict = remapped
+        self.scalar_head.load_state_dict(state_dict)
         self.scalar_head.to(device=self._model.device, dtype=torch.float32)
         self.scalar_head.eval()
 
@@ -289,7 +288,7 @@ class BufferedVLMRewardModel(VLMRewardModel):
         if self.scalar_head is None:
             raise RuntimeError("Scalar potential head is not initialized")
         features = self.extract_prompt_features(batched_inputs)
-        logits = self.scalar_head(features)
+        logits = self.scalar_head(features).squeeze(-1)
         return torch.sigmoid(logits)
 
     def setup_model(self) -> None:
