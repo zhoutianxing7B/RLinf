@@ -12,8 +12,11 @@ embodied RL jobs.
      - What you get
    * - :doc:`Agentic Guides <../agentic>`
      - Operational workflows for agentic tasks.
+   * - :doc:`Agentic Reward SAC <agentic_reward>`
+     - Run the Luna-guided physical reward loop on LIBERO.
 
 .. toctree::
    :hidden:
 
    Agentic Guides <../agentic>
+   Agentic Reward SAC <agentic_reward>

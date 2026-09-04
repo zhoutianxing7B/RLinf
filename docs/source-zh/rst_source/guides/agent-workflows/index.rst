@@ -11,8 +11,11 @@
      - 内容
    * - :doc:`智能体指南 <../agentic>`
      - 智能体任务的操作流程。
+   * - :doc:`Agentic Reward SAC <agentic_reward>`
+     - 在 LIBERO 上运行 Luna 驱动的物理奖励闭环。
 
 .. toctree::
    :hidden:
 
    智能体指南 <../agentic>
+   Agentic Reward SAC <agentic_reward>
