@@ -15,6 +15,7 @@
 import asyncio
 import copy
 import gc
+import os
 import time
 from typing import Any, Callable, Literal, Optional
 
@@ -147,8 +148,21 @@ class MultiStepRolloutWorker(Worker):
         self.hf_model: BasePolicy = get_model(rollout_model_config)
 
         if self.cfg.runner.get("ckpt_path", None):
-            model_dict = torch.load(self.cfg.runner.ckpt_path)
-            self.hf_model.load_state_dict(model_dict)
+            checkpoint_path = os.path.expanduser(str(self.cfg.runner.ckpt_path))
+            if os.path.isdir(checkpoint_path):
+                checkpoint_path = os.path.join(checkpoint_path, "model.pt")
+            model_dict = torch.load(
+                checkpoint_path, map_location="cpu", weights_only=True
+            )
+            incompatible = self.hf_model.load_state_dict(model_dict, strict=False)
+            missing = [
+                name for name in incompatible.missing_keys if "q_head" not in name
+            ]
+            if missing or incompatible.unexpected_keys:
+                raise ValueError(
+                    "Rollout checkpoint is incompatible: "
+                    f"missing={missing}, unexpected={incompatible.unexpected_keys}"
+                )
 
         rlt_feature_model_config = OmegaConf.select(
             self.cfg, "rollout.rlt_feature_model", default=None
