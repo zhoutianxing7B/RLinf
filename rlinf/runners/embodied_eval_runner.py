@@ -61,31 +61,41 @@ class EmbodiedEvalRunner:
         env_handle.wait()
 
     def evaluate(self):
-        # Channel direction convention (names follow the receiver, not the sender):
-        #   rollout_channel: env -> rollout  (env sends obs/RTC requests, rollout receives)
-        #   env_channel:     rollout -> env  (rollout sends actions/RTC responses, env receives)
-        env_handle: Handle = self.env.evaluate(
-            input_channel=self.env_channel,
-            rollout_channel=self.rollout_channel,
-        )
-        rollout_handle: Handle = self.rollout.evaluate(
-            input_channel=self.rollout_channel,
-            output_channel=self.env_channel,
-        )
+        eval_repeats = int(self.cfg.runner.get("eval_repeats", 1))
+        if eval_repeats < 1:
+            raise ValueError("runner.eval_repeats must be positive.")
 
-        env_results = env_handle.wait()
+        env_metrics_list = []
+        rollout_metrics_list = []
         env_decoupled_mode = self.cfg.runner.get("enable_decoupled_mode", False)
+        for _ in range(eval_repeats):
+            # Channel names follow the receiver: rollout_channel is env -> rollout,
+            # while env_channel is rollout -> env.
+            env_handle: Handle = self.env.evaluate(
+                input_channel=self.env_channel,
+                rollout_channel=self.rollout_channel,
+            )
+            rollout_handle: Handle = self.rollout.evaluate(
+                input_channel=self.rollout_channel,
+                output_channel=self.env_channel,
+            )
+
+            env_results = env_handle.wait()
+            env_metrics_list.extend(
+                results for results in env_results if results is not None
+            )
+            if not env_decoupled_mode:
+                rollout_results = rollout_handle.wait()
+                rollout_metrics_list.extend(
+                    results for results in rollout_results if results is not None
+                )
+
         if not env_decoupled_mode:
-            rollout_results = rollout_handle.wait()
-            rollout_metrics_list = [
-                results for results in rollout_results if results is not None
-            ]
             rollout_metrics = compute_evaluate_metrics(rollout_metrics_list)
             rollout_metrics.pop("num_trajectories", None)
         else:
             rollout_metrics = {}
 
-        env_metrics_list = [results for results in env_results if results is not None]
         eval_metrics = compute_evaluate_metrics(env_metrics_list)
         eval_metrics.update(rollout_metrics)
         return eval_metrics
