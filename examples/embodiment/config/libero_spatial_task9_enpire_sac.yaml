@@ -90,7 +90,7 @@ env:
   enable_offload: false
   train:
     rollout_epoch: 1
-    total_num_envs: 32
+    total_num_envs: 40
     auto_reset: false
     ignore_terminations: true
     use_rel_reward: false
@@ -113,7 +113,7 @@ env:
       reload_interval_steps: 16
   eval:
     rollout_epoch: 1
-    total_num_envs: 50
+    total_num_envs: 100
     auto_reset: true
     ignore_terminations: true
     use_rel_reward: false
@@ -202,6 +202,7 @@ agentic_reward:
   controller:
     program_path: "${env.train.agentic_reward.program_path}"
     scene_context_path: "examples/agentic_reward/scenes/libero_spatial_task9.json"
+    bootstrap_reward_history_path: "examples/agentic_reward/history/libero_spatial_task9_v14_trials.json"
     audit_dir: "${oc.env:ENPIRE_AUDIT_DIR,${runner.logger.log_path}/${runner.logger.experiment_name}/agentic_audit}"
     gamma: ${algorithm.gamma}
     score_keys: []

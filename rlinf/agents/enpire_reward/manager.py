@@ -21,6 +21,40 @@ from rlinf.agents.enpire_reward.physical_potential import (
     validate_physical_reward_program,
 )
 
+_MANAGER_METRIC_PREFIXES = (
+    "env/physical_",
+    "train/actor/",
+    "train/critic/",
+    "train/sac/",
+    "train/demo_buffer/",
+)
+
+
+def _compact_experiment(experiment: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep causal reward evidence without resending full trainer telemetry."""
+    compact = {
+        key: experiment[key]
+        for key in (
+            "kind",
+            "step",
+            "action",
+            "score",
+            "score_panel",
+            "reward_digest",
+            "candidate_evaluation",
+            "candidate_burn_in_completed",
+        )
+        if key in experiment
+    }
+    metrics = experiment.get("metrics", {})
+    if isinstance(metrics, Mapping):
+        compact["metrics"] = {
+            str(key): value
+            for key, value in metrics.items()
+            if str(key).startswith(_MANAGER_METRIC_PREFIXES)
+        }
+    return compact
+
 
 class LunaRewardManagerError(RuntimeError):
     """A redacted manager transport or response failure."""
@@ -159,6 +193,7 @@ class LunaRewardManager:
         current_program: Mapping[str, Any],
         experiment_history: Sequence[Mapping[str, Any]],
         expected_gamma: float,
+        reward_history: Sequence[Mapping[str, Any]] = (),
     ) -> LunaProposal:
         """Ask Luna for one locally validated physical reward revision."""
         available_keys = [str(key) for key in scene_context["available_physical_keys"]]
@@ -256,7 +291,11 @@ class LunaRewardManager:
         evidence = {
             "scene": scene_context,
             "current_program": current_program,
-            "recent_experiments": list(experiment_history[-8:]),
+            "recent_experiments": [
+                _compact_experiment(experiment)
+                for experiment in experiment_history[-8:]
+            ],
+            "past_reward_trials": list(reward_history[-8:]),
             "contract": contract,
         }
         messages = [
@@ -270,9 +309,14 @@ class LunaRewardManager:
                     "task and scene; then diagnose verifier precision/recall, "
                     "stability, and SAC learnability from recent experiments. "
                     "Use TP/FP/FN and per-condition evidence for verifier changes. "
+                    "Treat past_reward_trials as causal memory: never return an "
+                    "exact reward that was rolled back, and after a rollback change "
+                    "a structural hypothesis instead of merely cycling old thresholds. "
                     "Do not infer false positives from completion occupancy alone: "
                     "rollouts continue after success, so occupancy and "
-                    "success_at_end are not directly comparable. For an object "
+                    "success_at_end are not directly comparable. success_regressions "
+                    "describe policy behavior, not verifier error, so never tighten a "
+                    "completion gate solely to reduce that metric. For an object "
                     "placed on a support, prefer signed relative height plus XY "
                     "alignment and low inter-frame displacement over absolute "
                     "height distance alone. Keep potential terms bounded and "
@@ -317,6 +361,16 @@ class LunaRewardManager:
                     available_keys=available_keys,
                     expected_gamma=expected_gamma,
                 )
+                rejected_digests = {
+                    str(trial.get("digest"))
+                    for trial in reward_history
+                    if str(trial.get("terminal_action", "")).startswith("rollback")
+                }
+                if physical_program_digest(program) in rejected_digests:
+                    raise PhysicalRewardProgramError(
+                        "This exact reward program was already rolled back; propose a "
+                        "structurally different hypothesis."
+                    )
             except (LunaRewardManagerError, PhysicalRewardProgramError) as error:
                 last_error = str(error)
                 if schema_attempt == self.config.max_retries:

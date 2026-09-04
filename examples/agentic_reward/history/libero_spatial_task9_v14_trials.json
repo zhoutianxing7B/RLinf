@@ -1,0 +1,404 @@
+[
+  {
+    "digest": "b92b20855e099102e3423605be5bdb6cb669ca1ebaf8540ad0f121790813b503",
+    "evaluations": [
+      {
+        "action": "candidate_burn_in",
+        "physical_fn_once": 0.0,
+        "physical_fp_once": 0.09375,
+        "physical_tp_once": 0.28125,
+        "q_data": 2.442263126373291,
+        "score": 0.07999999821186066,
+        "score_panel": {
+          "reset_panel_a": 0.23999999463558197,
+          "reset_panel_b": 0.07999999821186066
+        },
+        "step": 10
+      },
+      {
+        "action": "continue_candidate",
+        "physical_fn_once": 0.0,
+        "physical_fp_once": 0.3125,
+        "physical_tp_once": 0.09375,
+        "q_data": 3.981186628341675,
+        "score": 0.20000000298023224,
+        "score_panel": {
+          "reset_panel_a": 0.36000001430511475,
+          "reset_panel_b": 0.20000000298023224
+        },
+        "step": 15
+      },
+      {
+        "action": "accept",
+        "physical_fn_once": 0.0,
+        "physical_fp_once": 0.21875,
+        "physical_tp_once": 0.21875,
+        "q_data": 5.685774326324463,
+        "score": 0.36000001430511475,
+        "score_panel": {
+          "reset_panel_a": 0.5199999809265137,
+          "reset_panel_b": 0.36000001430511475
+        },
+        "step": 20
+      },
+      {
+        "action": "champion_continue",
+        "physical_fn_once": 0.0,
+        "physical_fp_once": 0.25,
+        "physical_tp_once": 0.28125,
+        "q_data": 7.098385810852051,
+        "score": 0.4399999976158142,
+        "score_panel": {
+          "reset_panel_a": 0.47999998927116394,
+          "reset_panel_b": 0.4399999976158142
+        },
+        "step": 25
+      },
+      {
+        "action": "champion_continue",
+        "physical_fn_once": 0.0625,
+        "physical_fp_once": 0.1875,
+        "physical_tp_once": 0.34375,
+        "q_data": 8.439781188964844,
+        "score": 0.36000001430511475,
+        "score_panel": {
+          "reset_panel_a": 0.4000000059604645,
+          "reset_panel_b": 0.36000001430511475
+        },
+        "step": 30
+      },
+      {
+        "action": "rollback_champion_regression",
+        "physical_fn_once": 0.0625,
+        "physical_fp_once": 0.21875,
+        "physical_tp_once": 0.25,
+        "q_data": 9.465578079223633,
+        "score": 0.20000000298023224,
+        "score_panel": {
+          "reset_panel_a": 0.2800000011920929,
+          "reset_panel_b": 0.20000000298023224
+        },
+        "step": 35
+      }
+    ],
+    "program": {
+      "completion_bonus": 1.0,
+      "completion_conditions": [
+        {
+          "axes": [
+            0,
+            1
+          ],
+          "left": "akita_black_bowl_1_pos",
+          "op": "lt",
+          "right": "plate_1_pos",
+          "threshold": 0.06,
+          "type": "distance"
+        },
+        {
+          "index": 2,
+          "left": "akita_black_bowl_1_pos",
+          "op": "gt",
+          "right": "plate_1_pos",
+          "threshold": 0.01,
+          "type": "relative_scalar"
+        },
+        {
+          "axes": [
+            0,
+            1,
+            2
+          ],
+          "key": "akita_black_bowl_1_pos",
+          "op": "lt",
+          "threshold": 0.01,
+          "type": "delta_distance"
+        }
+      ],
+      "completion_hold_steps": 5,
+      "gamma": 0.999,
+      "name": "task9_stable_bowl_place",
+      "potential_scale": 0.2,
+      "potential_terms": [
+        {
+          "axes": [
+            0,
+            1,
+            2
+          ],
+          "left": "robot0_eef_pos",
+          "right": "akita_black_bowl_1_pos",
+          "scale": 0.15,
+          "type": "distance",
+          "weight": 0.25
+        },
+        {
+          "index": 2,
+          "key": "akita_black_bowl_1_pos",
+          "scale": 0.1,
+          "type": "height_delta",
+          "weight": 0.25
+        },
+        {
+          "axes": [
+            0,
+            1
+          ],
+          "left": "akita_black_bowl_1_pos",
+          "right": "plate_1_pos",
+          "scale": 0.2,
+          "type": "distance",
+          "weight": 0.5
+        }
+      ],
+      "rationale": "The XY gate is the weak condition (0.3125 at end versus 0.75 for height), while once-only FP is 0.25 and regressions are high; require tighter XY alignment, signed bowl-above-plate height, and low bowl displacement held across frames to improve precision and stability while retaining bounded approach, lift, and transport shaping.",
+      "schema_version": 1,
+      "task_ids": [
+        9
+      ]
+    },
+    "terminal_action": "rollback_champion_regression"
+  },
+  {
+    "digest": "c7ef4966848f5b9a90bfd95a129f908ecc4b3a21febda25486b5717f75db806d",
+    "evaluations": [
+      {
+        "action": "candidate_burn_in",
+        "physical_fn_once": 0.15625,
+        "physical_fp_once": 0.0625,
+        "physical_tp_once": 0.28125,
+        "q_data": 0.6156172156333923,
+        "score": 0.36000001430511475,
+        "score_panel": {
+          "reset_panel_a": 0.5199999809265137,
+          "reset_panel_b": 0.36000001430511475
+        },
+        "step": 40
+      },
+      {
+        "action": "continue_candidate",
+        "physical_fn_once": 0.125,
+        "physical_fp_once": 0.15625,
+        "physical_tp_once": 0.15625,
+        "q_data": 1.2290573120117188,
+        "score": 0.23999999463558197,
+        "score_panel": {
+          "reset_panel_a": 0.36000001430511475,
+          "reset_panel_b": 0.23999999463558197
+        },
+        "step": 45
+      },
+      {
+        "action": "rollback_regression",
+        "physical_fn_once": 0.0625,
+        "physical_fp_once": 0.15625,
+        "physical_tp_once": 0.15625,
+        "q_data": 2.157268524169922,
+        "score": 0.23999999463558197,
+        "score_panel": {
+          "reset_panel_a": 0.36000001430511475,
+          "reset_panel_b": 0.23999999463558197
+        },
+        "step": 50
+      }
+    ],
+    "program": {
+      "completion_bonus": 1.0,
+      "completion_conditions": [
+        {
+          "axes": [
+            0,
+            1
+          ],
+          "left": "akita_black_bowl_1_pos",
+          "op": "lt",
+          "right": "plate_1_pos",
+          "threshold": 0.05,
+          "type": "distance"
+        },
+        {
+          "index": 2,
+          "left": "akita_black_bowl_1_pos",
+          "op": "gt",
+          "right": "plate_1_pos",
+          "threshold": 0.015,
+          "type": "relative_scalar"
+        },
+        {
+          "axes": [
+            0,
+            1,
+            2
+          ],
+          "key": "akita_black_bowl_1_pos",
+          "op": "lt",
+          "threshold": 0.006,
+          "type": "delta_distance"
+        }
+      ],
+      "completion_hold_steps": 8,
+      "gamma": 0.999,
+      "name": "task9_precise_stable_bowl_place",
+      "potential_scale": 0.2,
+      "potential_terms": [
+        {
+          "axes": [
+            0,
+            1,
+            2
+          ],
+          "left": "robot0_eef_pos",
+          "right": "akita_black_bowl_1_pos",
+          "scale": 0.15,
+          "type": "distance",
+          "weight": 0.25
+        },
+        {
+          "index": 2,
+          "key": "akita_black_bowl_1_pos",
+          "scale": 0.1,
+          "type": "height_delta",
+          "weight": 0.25
+        },
+        {
+          "axes": [
+            0,
+            1
+          ],
+          "left": "akita_black_bowl_1_pos",
+          "right": "plate_1_pos",
+          "scale": 0.2,
+          "type": "distance",
+          "weight": 0.5
+        }
+      ],
+      "rationale": "The task progresses through approach, lift, XY transport, and stable placement. Across recent runs, the XY gate is consistently weakest (0.156-0.375 at end versus 0.406-0.750 for signed height), while the displacement gate is nearly always satisfied (0.969-1.000 occupancy), so tighten XY alignment and signed bowl-above-plate height modestly and tighten the stability threshold with an 8-step hold. Physical once-only TP is 0.094-0.344 with FN once 0-0.063, but FP once remains 0.094-0.313 and regressions 0.563-2.125; the longer stable hold targets precision and post-placement stability without changing bounded approach, lift, and transport shaping that supports SAC learnability.",
+      "schema_version": 1,
+      "task_ids": [
+        9
+      ]
+    },
+    "terminal_action": "rollback_regression"
+  },
+  {
+    "digest": "bf3048708e3269b8fb39841e206c8e1af47449a1d63fed73773bfce525ec0d30",
+    "evaluations": [
+      {
+        "action": "candidate_burn_in",
+        "physical_fn_once": 0.0,
+        "physical_fp_once": 0.09375,
+        "physical_tp_once": 0.40625,
+        "q_data": 3.470777988433838,
+        "score": 0.36000001430511475,
+        "score_panel": {
+          "reset_panel_a": 0.36000001430511475,
+          "reset_panel_b": 0.4399999976158142
+        },
+        "step": 55
+      },
+      {
+        "action": "continue_candidate",
+        "physical_fn_once": 0.0,
+        "physical_fp_once": 0.09375,
+        "physical_tp_once": 0.46875,
+        "q_data": 6.263798236846924,
+        "score": 0.23999999463558197,
+        "score_panel": {
+          "reset_panel_a": 0.4399999976158142,
+          "reset_panel_b": 0.23999999463558197
+        },
+        "step": 60
+      },
+      {
+        "action": "rollback_regression",
+        "physical_fn_once": 0.0,
+        "physical_fp_once": 0.28125,
+        "physical_tp_once": 0.21875,
+        "q_data": 9.184206008911133,
+        "score": 0.4000000059604645,
+        "score_panel": {
+          "reset_panel_a": 0.4399999976158142,
+          "reset_panel_b": 0.4000000059604645
+        },
+        "step": 65
+      }
+    ],
+    "program": {
+      "completion_bonus": 1.0,
+      "completion_conditions": [
+        {
+          "axes": [
+            0,
+            1
+          ],
+          "left": "akita_black_bowl_1_pos",
+          "op": "lt",
+          "right": "plate_1_pos",
+          "threshold": 0.065,
+          "type": "distance"
+        },
+        {
+          "index": 2,
+          "left": "akita_black_bowl_1_pos",
+          "op": "gt",
+          "right": "plate_1_pos",
+          "threshold": 0.008,
+          "type": "relative_scalar"
+        },
+        {
+          "axes": [
+            0,
+            1,
+            2
+          ],
+          "key": "akita_black_bowl_1_pos",
+          "op": "lt",
+          "threshold": 0.01,
+          "type": "delta_distance"
+        }
+      ],
+      "completion_hold_steps": 4,
+      "gamma": 0.999,
+      "name": "task9_stable_bowl_place_v4",
+      "potential_scale": 0.15,
+      "potential_terms": [
+        {
+          "axes": [
+            0,
+            1,
+            2
+          ],
+          "left": "robot0_eef_pos",
+          "right": "akita_black_bowl_1_pos",
+          "scale": 0.15,
+          "type": "distance",
+          "weight": 0.25
+        },
+        {
+          "index": 2,
+          "key": "akita_black_bowl_1_pos",
+          "scale": 0.1,
+          "type": "height_delta",
+          "weight": 0.25
+        },
+        {
+          "axes": [
+            0,
+            1
+          ],
+          "left": "akita_black_bowl_1_pos",
+          "right": "plate_1_pos",
+          "scale": 0.2,
+          "type": "distance",
+          "weight": 0.5
+        }
+      ],
+      "rationale": "Revision 3 improved once-only precision (FP 0.0625) but reduced recall (TP 0.28125, FN 0.15625) and learnability, while XY remained the weakest gate and regressions stayed high; slightly relax XY and signed-height tolerances and shorten the stability hold to recover valid placements without removing the low-displacement requirement, with reduced bounded shaping to limit SAC instability.",
+      "schema_version": 1,
+      "task_ids": [
+        9
+      ]
+    },
+    "terminal_action": "rollback_regression"
+  }
+]

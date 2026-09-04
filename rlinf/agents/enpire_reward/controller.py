@@ -64,6 +64,7 @@ class RewardEvolutionController:
         min_improvement: float,
         regression_tolerance: float,
         manager_config: LunaRewardManagerConfig,
+        bootstrap_reward_history_path: str | Path | None = None,
         baseline_warmup_evaluations: int = 1,
         candidate_burn_in_evaluations: int = 0,
         candidate_min_evaluations: int = 1,
@@ -110,6 +111,9 @@ class RewardEvolutionController:
             raise ValueError("Agentic reward requires score keys or score panels.")
         self.scene_context = json.loads(self.scene_context_path.read_text())
         self.manager = LunaRewardManager(manager_config)
+        bootstrap_reward_history = self._load_bootstrap_reward_history(
+            bootstrap_reward_history_path
+        )
         self.audit_dir.mkdir(parents=True, exist_ok=True)
         if self.state_path.exists():
             self.state = json.loads(self.state_path.read_text())
@@ -132,8 +136,10 @@ class RewardEvolutionController:
                 "candidate_recent_scores": [],
                 "baseline_evaluations": 0,
                 "champion_stale_evaluations": 0,
+                "champion_improvement_scores": [],
                 "manager_cycle_started": False,
                 "experiments": [],
+                "reward_trials": bootstrap_reward_history,
                 "manager": self.manager.audit(),
             }
             self._save_state()
@@ -142,8 +148,53 @@ class RewardEvolutionController:
         self.state.setdefault("candidate_recent_scores", [])
         self.state.setdefault("baseline_evaluations", 0)
         self.state.setdefault("champion_stale_evaluations", 0)
+        self.state.setdefault("champion_improvement_scores", [])
         self.state.setdefault("manager_cycle_started", False)
+        self.state.setdefault("reward_trials", [])
         self._write_report()
+
+    def _load_bootstrap_reward_history(
+        self, path: str | Path | None
+    ) -> list[dict[str, Any]]:
+        """Load validated, secret-free reward trials from an earlier campaign."""
+        if path is None or not str(path):
+            return []
+        decoded = json.loads(Path(path).read_text())
+        if not isinstance(decoded, list):
+            raise ValueError("bootstrap_reward_history_path must contain a JSON list.")
+        trials = []
+        for index, raw_trial in enumerate(decoded):
+            if not isinstance(raw_trial, Mapping):
+                raise ValueError(f"Bootstrap reward trial {index} must be an object.")
+            program = validate_physical_reward_program(
+                raw_trial.get("program", {}),
+                available_keys=self.scene_context["available_physical_keys"],
+                expected_gamma=self.expected_gamma,
+            )
+            digest = physical_program_digest(program)
+            recorded_digest = raw_trial.get("digest")
+            if recorded_digest is not None and str(recorded_digest) != digest:
+                raise ValueError(f"Bootstrap reward trial {index} digest is invalid.")
+            evaluations = raw_trial.get("evaluations", [])
+            if not isinstance(evaluations, list):
+                raise ValueError(
+                    f"Bootstrap reward trial {index} evaluations must be a list."
+                )
+            terminal_action = raw_trial.get("terminal_action")
+            if terminal_action is not None and not isinstance(terminal_action, str):
+                raise ValueError(
+                    f"Bootstrap reward trial {index} terminal_action must be text."
+                )
+            trials.append(
+                {
+                    "digest": digest,
+                    "program": program,
+                    "evaluations": evaluations,
+                    "terminal_action": terminal_action,
+                    "source": str(path),
+                }
+            )
+        return trials
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any]) -> "RewardEvolutionController":
@@ -171,6 +222,7 @@ class RewardEvolutionController:
             champion_patience_evaluations=config.get(
                 "champion_patience_evaluations", 2
             ),
+            bootstrap_reward_history_path=config.get("bootstrap_reward_history_path"),
             manager_config=LunaRewardManagerConfig(
                 base_url=manager.get("base_url", "https://maimai.it.com"),
                 model=manager.get("model", "gpt-5.6-luna"),
@@ -310,6 +362,7 @@ class RewardEvolutionController:
                 current_program=current_program,
                 experiment_history=self.state["experiments"],
                 expected_gamma=self.expected_gamma,
+                reward_history=self.state["reward_trials"],
             )
         except LunaRewardManagerError as error:
             event = {
@@ -328,6 +381,14 @@ class RewardEvolutionController:
         self.state["candidate_recent_scores"] = []
         self.state["champion_stale_evaluations"] = 0
         self.state["manager"] = self.manager.audit()
+        self.state["reward_trials"].append(
+            {
+                "digest": digest,
+                "program": dict(proposal.program),
+                "evaluations": [],
+                "terminal_action": None,
+            }
+        )
         event = {
             "kind": "proposal",
             "proposal": proposal_audit(proposal),
@@ -346,6 +407,8 @@ class RewardEvolutionController:
     ) -> EvolutionDecision:
         """Advance warmup or evaluate a reward candidate at a fixed boundary."""
         score, panel = self._score(metrics)
+        evaluated_program = json.loads(self.program_path.read_text())
+        evaluated_reward_digest = physical_program_digest(evaluated_program)
         checkpoint_path = str(Path(checkpoint_path).resolve())
         rollback_checkpoint = None
         action = "baseline"
@@ -424,10 +487,21 @@ class RewardEvolutionController:
             action = "champion_continue"
             champion_score = float(self.state["champion_score"])
             if score >= champion_score + self.min_improvement:
-                self.state["champion_score"] = score
-                self.state["champion_checkpoint"] = checkpoint_path
-                self.state["champion_stale_evaluations"] = 0
+                improvement_scores = list(self.state["champion_improvement_scores"])
+                improvement_scores.append(score)
+                improvement_scores = improvement_scores[
+                    -self.candidate_min_evaluations :
+                ]
+                self.state["champion_improvement_scores"] = improvement_scores
+                if len(improvement_scores) >= self.candidate_min_evaluations:
+                    self.state["champion_score"] = min(improvement_scores)
+                    self.state["champion_checkpoint"] = checkpoint_path
+                    self.state["champion_stale_evaluations"] = 0
+                    self.state["champion_improvement_scores"] = []
+                else:
+                    action = "champion_improvement_pending"
             else:
+                self.state["champion_improvement_scores"] = []
                 stale_evaluations = int(self.state["champion_stale_evaluations"]) + 1
                 self.state["champion_stale_evaluations"] = stale_evaluations
                 if stale_evaluations >= self.champion_patience_evaluations:
@@ -449,11 +523,36 @@ class RewardEvolutionController:
             "candidate_burn_in_completed": int(
                 self.state["candidate_burn_in_completed"]
             ),
+            "reward_digest": evaluated_reward_digest,
             "metrics": {
                 str(key): _json_scalar(value) for key, value in metrics.items()
             },
         }
         self.state["experiments"].append(experiment)
+        for trial in reversed(self.state["reward_trials"]):
+            if trial.get("digest") != evaluated_reward_digest:
+                continue
+            trial["evaluations"].append(
+                {
+                    "step": int(step),
+                    "action": action,
+                    "score": score,
+                    "score_panel": panel,
+                    "physical_tp_once": _json_scalar(
+                        metrics.get("env/physical_completion_tp_once")
+                    ),
+                    "physical_fp_once": _json_scalar(
+                        metrics.get("env/physical_completion_fp_once")
+                    ),
+                    "physical_fn_once": _json_scalar(
+                        metrics.get("env/physical_completion_fn_once")
+                    ),
+                    "q_data": _json_scalar(metrics.get("train/critic/q_data")),
+                }
+            )
+            if action.startswith("rollback") or action == "accept":
+                trial["terminal_action"] = action
+            break
         self._append_event(experiment)
 
         champion_score = float(self.state["champion_score"])

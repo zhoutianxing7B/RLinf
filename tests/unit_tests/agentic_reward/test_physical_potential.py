@@ -8,6 +8,7 @@ import pytest
 
 from rlinf.agents.enpire_reward.controller import RewardEvolutionController
 from rlinf.agents.enpire_reward.manager import (
+    LunaProposal,
     LunaRewardManager,
     LunaRewardManagerConfig,
 )
@@ -15,6 +16,7 @@ from rlinf.agents.enpire_reward.physical_potential import (
     PhysicalPotentialRewardRuntime,
     PhysicalRewardProgramError,
     atomic_write_physical_reward_program,
+    physical_program_digest,
     validate_physical_reward_program,
 )
 
@@ -491,3 +493,178 @@ def test_validator_bounds_audit_component_count():
 def test_completion_bonus_is_fixed_for_comparable_elite_threshold():
     with pytest.raises(PhysicalRewardProgramError, match="must equal 1.0"):
         validate_physical_reward_program(_program(completion_bonus=2.0))
+
+
+def test_manager_compacts_evidence_and_rejects_rolled_back_duplicate(monkeypatch):
+    rolled_back = _program(name="rolled_back")
+    revised = _program(name="revised", completion_hold_steps=3)
+    responses = [rolled_back, revised]
+    observed_messages = []
+    manager = LunaRewardManager(LunaRewardManagerConfig(max_retries=2))
+
+    def fake_request(messages):
+        observed_messages.append(list(messages))
+        program = responses.pop(0)
+        return (
+            {
+                "id": f"response-{len(observed_messages)}",
+                "choices": [{"message": {"content": json.dumps(program)}}],
+                "usage": {"total_tokens": 10},
+            },
+            1,
+            0.1,
+        )
+
+    monkeypatch.setattr(manager, "_request", fake_request)
+    proposal = manager.propose(
+        scene_context={
+            "task_ids": [9],
+            "available_physical_keys": ["object_pos", "target_pos"],
+        },
+        current_program=rolled_back,
+        experiment_history=[
+            {
+                "step": 10,
+                "action": "rollback_regression",
+                "score": 0.1,
+                "score_panel": {"a": 0.1},
+                "metrics": {
+                    "env/physical_completion_fp_once": 0.2,
+                    "time/irrelevant": 999.0,
+                },
+            }
+        ],
+        expected_gamma=0.99,
+        reward_history=[
+            {
+                "digest": physical_program_digest(rolled_back),
+                "program": rolled_back,
+                "evaluations": [{"action": "rollback_regression"}],
+                "terminal_action": "rollback_regression",
+            }
+        ],
+    )
+
+    assert proposal.attempt == 2
+    assert proposal.program["name"] == "revised"
+    first_evidence = json.loads(observed_messages[0][-1]["content"])
+    assert first_evidence["past_reward_trials"][0]["terminal_action"] == (
+        "rollback_regression"
+    )
+    compact_metrics = first_evidence["recent_experiments"][0]["metrics"]
+    assert "env/physical_completion_fp_once" in compact_metrics
+    assert "time/irrelevant" not in compact_metrics
+    assert "already rolled back" in observed_messages[1][-1]["content"]
+
+
+def test_controller_requires_consecutive_champion_improvement(tmp_path):
+    program_path = tmp_path / "reward.json"
+    scene_path = tmp_path / "scene.json"
+    atomic_write_physical_reward_program(program_path, _program())
+    scene_path.write_text(
+        json.dumps(
+            {
+                "task_ids": [9],
+                "available_physical_keys": ["object_pos", "target_pos"],
+            }
+        )
+    )
+    controller = RewardEvolutionController(
+        program_path=program_path,
+        scene_context_path=scene_path,
+        audit_dir=tmp_path / "audit",
+        expected_gamma=0.99,
+        score_keys=["score"],
+        score_panels={},
+        target_score=0.7,
+        min_improvement=0.02,
+        regression_tolerance=0.02,
+        manager_config=LunaRewardManagerConfig(),
+        candidate_min_evaluations=2,
+        candidate_patience_evaluations=3,
+    )
+    controller.state.update(
+        {
+            "manager_cycle_started": True,
+            "champion_score": 0.2,
+            "champion_checkpoint": str(tmp_path / "old"),
+            "candidate_pending": False,
+        }
+    )
+
+    spike = controller.process_evaluation(
+        step=10, metrics={"score": 0.5}, checkpoint_path=tmp_path / "step10"
+    )
+    assert spike.action == "champion_improvement_pending"
+    assert spike.champion_score == pytest.approx(0.2)
+    assert controller.state["champion_checkpoint"].endswith("old")
+
+    confirmed = controller.process_evaluation(
+        step=15, metrics={"score": 0.4}, checkpoint_path=tmp_path / "step15"
+    )
+    assert confirmed.action == "champion_continue"
+    assert confirmed.champion_score == pytest.approx(0.4)
+    assert controller.state["champion_checkpoint"].endswith("step15")
+
+
+def test_controller_records_reward_trial_outcome(tmp_path, monkeypatch):
+    program_path = tmp_path / "reward.json"
+    scene_path = tmp_path / "scene.json"
+    seed = _program(name="seed")
+    candidate = _program(name="candidate", completion_hold_steps=3)
+    atomic_write_physical_reward_program(program_path, seed)
+    scene_path.write_text(
+        json.dumps(
+            {
+                "task_ids": [9],
+                "available_physical_keys": ["object_pos", "target_pos"],
+            }
+        )
+    )
+    controller = RewardEvolutionController(
+        program_path=program_path,
+        scene_context_path=scene_path,
+        audit_dir=tmp_path / "audit",
+        expected_gamma=0.99,
+        score_keys=["score"],
+        score_panels={},
+        target_score=0.7,
+        min_improvement=0.02,
+        regression_tolerance=0.02,
+        manager_config=LunaRewardManagerConfig(),
+        candidate_min_evaluations=1,
+        candidate_patience_evaluations=1,
+    )
+    controller.state.update(
+        {
+            "manager_cycle_started": True,
+            "champion_score": 0.5,
+            "champion_checkpoint": str(tmp_path / "champion"),
+        }
+    )
+    monkeypatch.setattr(
+        controller.manager,
+        "propose",
+        lambda **_: LunaProposal(candidate, "response", {}, 0.1, 1),
+    )
+    digest, _ = controller._propose_next()
+    assert digest == physical_program_digest(candidate)
+    monkeypatch.setattr(controller, "_propose_next", lambda: (None, None))
+
+    decision = controller.process_evaluation(
+        step=10,
+        metrics={
+            "score": 0.1,
+            "env/physical_completion_tp_once": 0.2,
+            "env/physical_completion_fp_once": 0.3,
+            "env/physical_completion_fn_once": 0.1,
+            "train/critic/q_data": 4.0,
+        },
+        checkpoint_path=tmp_path / "candidate_step",
+    )
+
+    assert decision.action == "rollback_regression"
+    trial = controller.state["reward_trials"][0]
+    assert trial["terminal_action"] == "rollback_regression"
+    assert trial["evaluations"][0]["physical_fp_once"] == pytest.approx(0.3)
+    assert trial["evaluations"][0]["q_data"] == pytest.approx(4.0)
