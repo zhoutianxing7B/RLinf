@@ -30,6 +30,7 @@ def _program(**overrides):
         "gamma": 0.99,
         "completion_bonus": 1.0,
         "completion_hold_steps": 2,
+        "completion_reward_mode": "occupancy",
         "completion_conditions": [
             {
                 "type": "distance",
@@ -162,6 +163,39 @@ def test_potential_progress_and_completion_hold(tmp_path):
     assert first_complete.completion.tolist() == [0.0]
     assert second_complete.completion.tolist() == [1.0]
     assert second_complete.rewards[0] > 0.9
+
+
+def test_first_onset_completion_reward_is_capped_per_episode(tmp_path):
+    path = tmp_path / "reward.json"
+    atomic_write_physical_reward_program(
+        path, _program(completion_reward_mode="first_onset")
+    )
+    runtime = PhysicalPotentialRewardRuntime(
+        path, num_envs=1, expected_gamma=0.99, reload_interval_steps=16
+    )
+    incomplete = _obs(0.0)
+    complete = _obs(0.95)
+    runtime.reset([incomplete])
+
+    runtime.compute([complete], [9])
+    onset = runtime.compute([complete], [9])
+    sustained = runtime.compute([complete], [9])
+    runtime.compute([incomplete], [9])
+    reacquired_1 = runtime.compute([complete], [9])
+    reacquired_2 = runtime.compute([complete], [9])
+
+    assert onset.completion.tolist() == [1.0]
+    assert onset.completion_reward.tolist() == [1.0]
+    assert sustained.completion.tolist() == [1.0]
+    assert sustained.completion_reward.tolist() == [0.0]
+    assert reacquired_1.completion.tolist() == [0.0]
+    assert reacquired_2.completion.tolist() == [1.0]
+    assert reacquired_2.completion_reward.tolist() == [0.0]
+
+    runtime.reset([incomplete])
+    runtime.compute([complete], [9])
+    next_episode_onset = runtime.compute([complete], [9])
+    assert next_episode_onset.completion_reward.tolist() == [1.0]
 
 
 def test_hot_reload_suppresses_artificial_potential_impulse(tmp_path):
@@ -493,6 +527,13 @@ def test_validator_bounds_audit_component_count():
 def test_completion_bonus_is_fixed_for_comparable_elite_threshold():
     with pytest.raises(PhysicalRewardProgramError, match="must equal 1.0"):
         validate_physical_reward_program(_program(completion_bonus=2.0))
+
+
+def test_validator_rejects_unknown_completion_reward_mode():
+    with pytest.raises(PhysicalRewardProgramError, match="completion_reward_mode"):
+        validate_physical_reward_program(
+            _program(completion_reward_mode="repeat_onset")
+        )
 
 
 def test_manager_compacts_evidence_and_rejects_rolled_back_duplicate(monkeypatch):

@@ -721,6 +721,7 @@ class LiberoEnv(gym.Env):
         self.returns = np.zeros(self.num_envs)
         self.success_episode_len = np.zeros(self.num_envs, dtype=np.int32)
         self.agentic_completion_return = np.zeros(self.num_envs)
+        self.agentic_completion_reward_return = np.zeros(self.num_envs)
         self.agentic_raw_completion_return = np.zeros(self.num_envs)
         self.agentic_completion_once = np.zeros(self.num_envs, dtype=bool)
         self.agentic_completion_previous = np.zeros(self.num_envs, dtype=bool)
@@ -747,6 +748,7 @@ class LiberoEnv(gym.Env):
             self.returns[mask] = 0
             self.success_episode_len[mask] = 0
             self.agentic_completion_return[mask] = 0.0
+            self.agentic_completion_reward_return[mask] = 0.0
             self.agentic_raw_completion_return[mask] = 0.0
             self.agentic_completion_once[mask] = False
             self.agentic_completion_previous[mask] = False
@@ -767,6 +769,7 @@ class LiberoEnv(gym.Env):
             self.returns[:] = 0.0
             self.success_episode_len[:] = 0
             self.agentic_completion_return[:] = 0.0
+            self.agentic_completion_reward_return[:] = 0.0
             self.agentic_raw_completion_return[:] = 0.0
             self.agentic_completion_once[:] = False
             self.agentic_completion_previous[:] = False
@@ -819,6 +822,7 @@ class LiberoEnv(gym.Env):
         if agentic_step is not None:
             completion_now = agentic_step.completion.astype(bool)
             self.agentic_completion_return += agentic_step.completion
+            self.agentic_completion_reward_return += agentic_step.completion_reward
             self.agentic_raw_completion_return += agentic_step.raw_completion
             self.agentic_completion_regressions += (
                 self.agentic_completion_previous & ~completion_now
@@ -846,6 +850,9 @@ class LiberoEnv(gym.Env):
             completion_once = self.agentic_completion_once
             episode_info["physical_completion_occupancy"] = (
                 self.agentic_completion_return.copy()
+            )
+            episode_info["physical_completion_reward_return"] = (
+                self.agentic_completion_reward_return.copy()
             )
             episode_info["physical_raw_completion_occupancy"] = (
                 self.agentic_raw_completion_return.copy()

@@ -8,6 +8,7 @@
   "gamma": 0.999,
   "completion_bonus": 1.0,
   "completion_hold_steps": 3,
+  "completion_reward_mode": "occupancy",
   "completion_conditions": [
     {
       "type": "distance",

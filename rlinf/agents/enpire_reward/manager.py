@@ -206,6 +206,10 @@ class LunaRewardManager:
                 "gamma": expected_gamma,
                 "completion_bonus": "fixed number 1.0",
                 "completion_hold_steps": "integer in [1, 32]",
+                "completion_reward_mode": (
+                    "occupancy emits the bonus on every verified frame; "
+                    "first_onset emits it only once per episode"
+                ),
                 "completion_conditions": [
                     {
                         "type": (
@@ -247,7 +251,8 @@ class LunaRewardManager:
                 ),
             },
             "executed_formula": (
-                "C(s_next) + potential_scale * (gamma*Phi(s_next)-Phi(s))"
+                "completion_reward(C(s_next), mode) + potential_scale * "
+                "(gamma*Phi(s_next)-Phi(s))"
             ),
             "physical_semantics": {
                 "relative_scalar": "left[index] - right[index]",
@@ -277,6 +282,10 @@ class LunaRewardManager:
                 ),
                 "condition_i_occupancy": (
                     "per-condition pass count; use it to identify the weak gate"
+                ),
+                "physical_completion_reward_return": (
+                    "completion bonuses actually emitted to SAC; first_onset caps "
+                    "this at one per episode while occupancy can grow with horizon"
                 ),
             },
             "forbidden_inputs": [
@@ -319,7 +328,11 @@ class LunaRewardManager:
                     "completion gate solely to reduce that metric. For an object "
                     "placed on a support, prefer signed relative height plus XY "
                     "alignment and low inter-frame displacement over absolute "
-                    "height distance alone. Keep potential terms bounded and "
+                    "height distance alone. When repeated occupancy-style candidates "
+                    "show rising Q scale or critic loss followed by policy regression, "
+                    "make a structural temporal change: consider first_onset completion "
+                    "and zero or very small potential shaping instead of another small "
+                    "threshold or weight adjustment. Keep potential terms bounded and "
                     "stage-aligned. Independent simulator success may be used only "
                     "as audit evidence here and must never appear in the executable "
                     "program. Do not invent unavailable signals, code, hard "

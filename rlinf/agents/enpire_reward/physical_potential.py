@@ -39,6 +39,7 @@ _SUPPORTED_CONDITION_TYPES = frozenset(
     {"delta_distance", "distance", "relative_scalar", "scalar"}
 )
 _SUPPORTED_OPERATORS = frozenset({"gt", "lt"})
+_SUPPORTED_COMPLETION_REWARD_MODES = frozenset({"first_onset", "occupancy"})
 _MAX_COMPONENTS = 8
 
 
@@ -142,6 +143,11 @@ def validate_physical_reward_program(
     hold_steps = int(program.get("completion_hold_steps", 1))
     if not 1 <= hold_steps <= 32:
         raise PhysicalRewardProgramError("completion_hold_steps must be in [1, 32].")
+    completion_reward_mode = str(program.get("completion_reward_mode", "occupancy"))
+    if completion_reward_mode not in _SUPPORTED_COMPLETION_REWARD_MODES:
+        raise PhysicalRewardProgramError(
+            "completion_reward_mode must be 'occupancy' or 'first_onset'."
+        )
     potential_scale = _finite_float(
         program.get("potential_scale", 0.1), "potential_scale"
     )
@@ -281,6 +287,7 @@ def validate_physical_reward_program(
         "gamma": gamma,
         "completion_bonus": completion_bonus,
         "completion_hold_steps": hold_steps,
+        "completion_reward_mode": completion_reward_mode,
         "completion_conditions": normalized_conditions,
         "potential_scale": potential_scale,
         "potential_terms": normalized_terms,
@@ -310,6 +317,7 @@ class PhysicalRewardStep:
 
     rewards: np.ndarray
     completion: np.ndarray
+    completion_reward: np.ndarray
     raw_completion: np.ndarray
     potential: np.ndarray
     potential_delta: np.ndarray
@@ -345,6 +353,7 @@ class PhysicalPotentialRewardRuntime:
         ]
         self._previous_potential = np.zeros(num_envs, dtype=np.float64)
         self._hold = np.zeros(num_envs, dtype=np.int32)
+        self._completion_seen = np.zeros(num_envs, dtype=bool)
         self._reload(force=True)
 
     def _reload(self, *, force: bool = False) -> bool:
@@ -403,6 +412,7 @@ class PhysicalPotentialRewardRuntime:
                 key: self._array(observation, key).copy() for key in temporal_keys
             }
             self._hold[env_index] = 0
+            self._completion_seen[env_index] = False
             self._previous_potential[env_index] = self._potential(
                 observation, env_index
             )
@@ -503,6 +513,7 @@ class PhysicalPotentialRewardRuntime:
             else np.asarray(terminal, dtype=bool)
         )
         completion = np.zeros(self.num_envs, dtype=np.float64)
+        completion_reward = np.zeros(self.num_envs, dtype=np.float64)
         raw_completion = np.zeros(self.num_envs, dtype=np.float64)
         potential = np.zeros(self.num_envs, dtype=np.float64)
         potential_delta = np.zeros(self.num_envs, dtype=np.float64)
@@ -539,6 +550,11 @@ class PhysicalPotentialRewardRuntime:
             completion[env_index] = float(
                 self._hold[env_index] >= self.program["completion_hold_steps"]
             )
+            if self.program["completion_reward_mode"] == "occupancy":
+                completion_reward[env_index] = completion[env_index]
+            elif completion[env_index] and not self._completion_seen[env_index]:
+                completion_reward[env_index] = 1.0
+                self._completion_seen[env_index] = True
             if not reloaded:
                 next_potential = 0.0 if terminal_mask[env_index] else current_potential
                 potential_delta[env_index] = (
@@ -552,12 +568,13 @@ class PhysicalPotentialRewardRuntime:
                         observation, condition["key"]
                     ).copy()
         rewards = (
-            self.program["completion_bonus"] * completion
+            self.program["completion_bonus"] * completion_reward
             + self.program["potential_scale"] * potential_delta
         )
         return PhysicalRewardStep(
             rewards=rewards.astype(np.float32),
             completion=completion.astype(np.float32),
+            completion_reward=completion_reward.astype(np.float32),
             raw_completion=raw_completion.astype(np.float32),
             potential=potential.astype(np.float32),
             potential_delta=potential_delta.astype(np.float32),

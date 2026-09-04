@@ -1,6 +1,6 @@
 [
   {
-    "digest": "b92b20855e099102e3423605be5bdb6cb669ca1ebaf8540ad0f121790813b503",
+    "digest": "a1b16e0967f53a1f0a6989c5f407073453f47dfa6c1a4158b8c17087d7237d46",
     "evaluations": [
       {
         "action": "candidate_burn_in",
@@ -116,6 +116,7 @@
         }
       ],
       "completion_hold_steps": 5,
+      "completion_reward_mode": "occupancy",
       "gamma": 0.999,
       "name": "task9_stable_bowl_place",
       "potential_scale": 0.2,
@@ -160,7 +161,7 @@
     "terminal_action": "rollback_champion_regression"
   },
   {
-    "digest": "c7ef4966848f5b9a90bfd95a129f908ecc4b3a21febda25486b5717f75db806d",
+    "digest": "e0132d5c58dad42104956d5649a9a82c529924dcf51cdde4a2ce2d676be3c088",
     "evaluations": [
       {
         "action": "candidate_burn_in",
@@ -237,6 +238,7 @@
         }
       ],
       "completion_hold_steps": 8,
+      "completion_reward_mode": "occupancy",
       "gamma": 0.999,
       "name": "task9_precise_stable_bowl_place",
       "potential_scale": 0.2,
@@ -281,7 +283,7 @@
     "terminal_action": "rollback_regression"
   },
   {
-    "digest": "bf3048708e3269b8fb39841e206c8e1af47449a1d63fed73773bfce525ec0d30",
+    "digest": "8fb26442a3a68323f584516ddd485b387f5e0c9b2f035c0d6d69b6ea81542c66",
     "evaluations": [
       {
         "action": "candidate_burn_in",
@@ -358,6 +360,7 @@
         }
       ],
       "completion_hold_steps": 4,
+      "completion_reward_mode": "occupancy",
       "gamma": 0.999,
       "name": "task9_stable_bowl_place_v4",
       "potential_scale": 0.15,
@@ -402,7 +405,7 @@
     "terminal_action": "rollback_regression"
   },
   {
-    "digest": "16f771dbb209e5280faf2efd8badf7326a94ef04f4b30582f97657956194443d",
+    "digest": "605dac57737d5fb1e2e5854e6079e45e5a790772cda59fa94740c4cce447cdd4",
     "evaluations": [
       {
         "action": "candidate_burn_in",
@@ -466,6 +469,7 @@
         }
       ],
       "completion_hold_steps": 6,
+      "completion_reward_mode": "occupancy",
       "gamma": 0.999,
       "name": "task9_signed_height_settle",
       "potential_scale": 0.18,
@@ -509,5 +513,264 @@
     },
     "terminal_action": "stopped_actor_instability",
     "termination_reason": "Verifier TP/FP/FN reached 0.425/0.025/0.0, but fixed-panel minimum fell from 0.44 to 0.34 as q_data reached 10.10; stabilize SAC actor updates before testing further reward revisions."
+  },
+  {
+    "digest": "f36957c6c2ba91fdd6efa9efc435f3a8807594bb01eb062287d0bf38a838919a",
+    "evaluations": [
+      {
+        "action": "candidate_burn_in",
+        "physical_fn_once": 0.0,
+        "physical_fp_once": 0.20000000298023224,
+        "physical_tp_once": 0.375,
+        "q_data": 3.7740204334259033,
+        "score": 0.41999998688697815,
+        "score_panel": {
+          "reset_panel_a": 0.46000000834465027,
+          "reset_panel_b": 0.41999998688697815
+        },
+        "step": 10
+      },
+      {
+        "action": "continue_candidate",
+        "physical_fn_once": 0.0,
+        "physical_fp_once": 0.05000000074505806,
+        "physical_tp_once": 0.4000000059604645,
+        "q_data": 6.224815368652344,
+        "score": 0.3199999928474426,
+        "score_panel": {
+          "reset_panel_a": 0.47999998927116394,
+          "reset_panel_b": 0.3199999928474426
+        },
+        "step": 15
+      },
+      {
+        "action": "rollback_regression",
+        "physical_fn_once": 0.0,
+        "physical_fp_once": 0.125,
+        "physical_tp_once": 0.30000001192092896,
+        "q_data": 8.181528091430664,
+        "score": 0.25999999046325684,
+        "score_panel": {
+          "reset_panel_a": 0.25999999046325684,
+          "reset_panel_b": 0.3400000035762787
+        },
+        "step": 20
+      }
+    ],
+    "program": {
+      "completion_bonus": 1.0,
+      "completion_conditions": [
+        {
+          "axes": [
+            0,
+            1
+          ],
+          "left": "akita_black_bowl_1_pos",
+          "op": "lt",
+          "right": "plate_1_pos",
+          "threshold": 0.075,
+          "type": "distance"
+        },
+        {
+          "index": 2,
+          "left": "akita_black_bowl_1_pos",
+          "op": "gt",
+          "right": "plate_1_pos",
+          "threshold": 0.01,
+          "type": "relative_scalar"
+        },
+        {
+          "axes": [
+            0,
+            1,
+            2
+          ],
+          "key": "akita_black_bowl_1_pos",
+          "op": "lt",
+          "threshold": 0.012,
+          "type": "delta_distance"
+        }
+      ],
+      "completion_hold_steps": 5,
+      "completion_reward_mode": "occupancy",
+      "gamma": 0.999,
+      "name": "task9_bounded_signed_settle",
+      "potential_scale": 0.12,
+      "potential_terms": [
+        {
+          "axes": [
+            0,
+            1,
+            2
+          ],
+          "left": "robot0_eef_pos",
+          "right": "akita_black_bowl_1_pos",
+          "scale": 0.15,
+          "type": "distance",
+          "weight": 0.25
+        },
+        {
+          "index": 2,
+          "key": "akita_black_bowl_1_pos",
+          "scale": 0.1,
+          "type": "height_delta",
+          "weight": 0.25
+        },
+        {
+          "axes": [
+            0,
+            1
+          ],
+          "left": "akita_black_bowl_1_pos",
+          "right": "plate_1_pos",
+          "scale": 0.2,
+          "type": "distance",
+          "weight": 0.5
+        }
+      ],
+      "rationale": "Use signed bowl-above-plate height, XY alignment, and low inter-frame bowl motion as a distinct placement-and-settle verifier; moderate tolerances and a five-frame hold address persistent false positives without treating post-success regressions as verifier error, while lowering bounded stage-aligned shaping to improve SAC stability.",
+      "schema_version": 1,
+      "task_ids": [
+        9
+      ]
+    },
+    "source": "v17 stable-SAC 100-episode fixed panels",
+    "terminal_action": "rollback_regression"
+  },
+  {
+    "digest": "7c1f883f8f868acffa42861a3b90bc45a8ba61837269d5d6d35772cf60755611",
+    "evaluations": [
+      {
+        "action": "candidate_burn_in",
+        "physical_fn_once": 0.0,
+        "physical_fp_once": 0.125,
+        "physical_tp_once": 0.30000001192092896,
+        "q_data": 3.793264389038086,
+        "score": 0.46000000834465027,
+        "score_panel": {
+          "reset_panel_a": 0.46000000834465027,
+          "reset_panel_b": 0.46000000834465027
+        },
+        "step": 25
+      },
+      {
+        "action": "continue_candidate",
+        "physical_fn_once": 0.0,
+        "physical_fp_once": 0.07500000298023224,
+        "physical_tp_once": 0.5249999761581421,
+        "q_data": 6.318523406982422,
+        "score": 0.4000000059604645,
+        "score_panel": {
+          "reset_panel_a": 0.4000000059604645,
+          "reset_panel_b": 0.47999998927116394
+        },
+        "step": 30
+      },
+      {
+        "action": "continue_candidate",
+        "physical_fn_once": 0.0,
+        "physical_fp_once": 0.20000000298023224,
+        "physical_tp_once": 0.4000000059604645,
+        "q_data": 8.955367088317871,
+        "score": 0.3400000035762787,
+        "score_panel": {
+          "reset_panel_a": 0.47999998927116394,
+          "reset_panel_b": 0.3400000035762787
+        },
+        "step": 35
+      },
+      {
+        "action": "rollback_regression",
+        "physical_fn_once": 0.0,
+        "physical_fp_once": 0.17499999701976776,
+        "physical_tp_once": 0.3499999940395355,
+        "q_data": 11.216785430908203,
+        "score": 0.25999999046325684,
+        "score_panel": {
+          "reset_panel_a": 0.25999999046325684,
+          "reset_panel_b": 0.36000001430511475
+        },
+        "step": 40
+      }
+    ],
+    "program": {
+      "completion_bonus": 1.0,
+      "completion_conditions": [
+        {
+          "axes": [
+            0,
+            1
+          ],
+          "left": "akita_black_bowl_1_pos",
+          "op": "lt",
+          "right": "plate_1_pos",
+          "threshold": 0.07,
+          "type": "distance"
+        },
+        {
+          "index": 2,
+          "left": "akita_black_bowl_1_pos",
+          "op": "gt",
+          "right": "plate_1_pos",
+          "threshold": 0.008,
+          "type": "relative_scalar"
+        },
+        {
+          "axes": [
+            0,
+            1,
+            2
+          ],
+          "key": "akita_black_bowl_1_pos",
+          "op": "lt",
+          "threshold": 0.008,
+          "type": "delta_distance"
+        }
+      ],
+      "completion_hold_steps": 6,
+      "completion_reward_mode": "occupancy",
+      "gamma": 0.999,
+      "name": "task9_xy_settle_shaping",
+      "potential_scale": 0.08,
+      "potential_terms": [
+        {
+          "axes": [
+            0,
+            1,
+            2
+          ],
+          "left": "robot0_eef_pos",
+          "right": "akita_black_bowl_1_pos",
+          "scale": 0.15,
+          "type": "distance",
+          "weight": 0.3
+        },
+        {
+          "index": 2,
+          "key": "akita_black_bowl_1_pos",
+          "scale": 0.1,
+          "type": "height_delta",
+          "weight": 0.25
+        },
+        {
+          "axes": [
+            0,
+            1
+          ],
+          "left": "akita_black_bowl_1_pos",
+          "right": "plate_1_pos",
+          "scale": 0.12,
+          "type": "distance",
+          "weight": 0.45
+        }
+      ],
+      "rationale": "The task requires approach, lift, XY transport, and stable placement. XY alignment is consistently the weak gate, while displacement is usually satisfied; signed height and six-frame low-motion confirmation retain physical precision without using absolute height alone. Recent signed-height candidates achieved TP once 0.30-0.40 with FP once 0.05-0.125 and FN once 0, but later policy regressions and rising SAC gradients indicate learnability instability rather than verifier error. Change the shaping structure by separating XY transport from vertical placement and reducing its bounded scale, while keeping moderate gates and a physical settle hold.",
+      "schema_version": 1,
+      "task_ids": [
+        9
+      ]
+    },
+    "source": "v17 stable-SAC 100-episode fixed panels",
+    "terminal_action": "rollback_regression"
   }
 ]
