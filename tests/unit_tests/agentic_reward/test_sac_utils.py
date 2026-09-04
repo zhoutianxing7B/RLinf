@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from rlinf.algorithms.sac_utils import (
+    actor_only_warmup_state_dict,
     behavior_regularized_actor_loss,
     discounted_chunk_rewards,
     extract_reward_elite_trajectory,
@@ -72,3 +73,13 @@ def test_reward_elite_replay_rejects_no_completion_and_invalid_threshold():
     assert extract_reward_elite_trajectory(trajectory, reward_threshold=0.5) is None
     with pytest.raises(ValueError):
         extract_reward_elite_trajectory(trajectory, reward_threshold=1.0)
+
+
+def test_actor_warmup_discards_reward_specific_q_heads():
+    state = {
+        "encoder.weight": torch.ones(1),
+        "actor_mean.weight": torch.ones(1),
+        "q_head.0.weight": torch.ones(1),
+    }
+    filtered = actor_only_warmup_state_dict(state)
+    assert set(filtered) == {"encoder.weight", "actor_mean.weight"}

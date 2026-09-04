@@ -13,6 +13,13 @@ import torch.nn.functional as F
 from rlinf.data.schema.embodied_types import Trajectory
 
 
+def actor_only_warmup_state_dict(
+    state_dict: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    """Discard reward-specific Q heads from a policy warm-start checkpoint."""
+    return {name: tensor for name, tensor in state_dict.items() if "q_head" not in name}
+
+
 def discounted_chunk_rewards(rewards: torch.Tensor, gamma: float) -> torch.Tensor:
     """Aggregate per-step rewards for an action chunk with SAC discounting.
 

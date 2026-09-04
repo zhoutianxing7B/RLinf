@@ -24,6 +24,7 @@ from omegaconf import DictConfig
 from torch.utils.data import DataLoader
 
 from rlinf.algorithms.sac_utils import (
+    actor_only_warmup_state_dict,
     behavior_regularized_actor_loss,
     discounted_chunk_rewards,
     extract_reward_elite_trajectory,
@@ -66,6 +67,7 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
         if not os.path.isfile(warmup_path):
             raise FileNotFoundError(f"Actor warmup checkpoint not found: {warmup_path}")
         state = torch.load(warmup_path, map_location="cpu", weights_only=True)
+        state = actor_only_warmup_state_dict(state)
         incompatible = model.load_state_dict(state, strict=False)
         missing = [name for name in incompatible.missing_keys if "q_head" not in name]
         if missing or incompatible.unexpected_keys:
