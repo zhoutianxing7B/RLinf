@@ -199,6 +199,18 @@ class LunaRewardManager:
                     }
                 ],
             },
+            "type_specific_fields": {
+                "completion.distance": "left, right, axes, op, threshold",
+                "completion.scalar": "key, index, op, threshold",
+                "completion.relative_scalar": "left, right, index, op, threshold",
+                "completion.delta_distance": "key, axes, op, threshold",
+                "potential.distance": "left, right, axes, scale, weight",
+                "potential.height_delta": "key, index, scale, weight",
+                "potential.scalar": "key, index, target, scale, weight",
+                "potential.relative_scalar": (
+                    "left, right, index, target, scale, weight"
+                ),
+            },
             "executed_formula": (
                 "C(s_next) + potential_scale * (gamma*Phi(s_next)-Phi(s))"
             ),
@@ -275,41 +287,66 @@ class LunaRewardManager:
                 "content": json.dumps(evidence, sort_keys=True, separators=(",", ":")),
             },
         ]
-        decoded, attempt, elapsed = self._request(messages)
-        choices = decoded.get("choices")
-        if not isinstance(choices, list) or not choices:
-            raise LunaRewardManagerError("Luna response has no choices.")
-        message = choices[0].get("message", {})
-        text = message.get("content") if isinstance(message, Mapping) else None
-        if not isinstance(text, str):
-            raise LunaRewardManagerError("Luna response has no text content.")
-        raw_program = _extract_json_object(text)
-        try:
-            program = validate_physical_reward_program(
-                raw_program,
-                available_keys=available_keys,
-                expected_gamma=expected_gamma,
+        total_elapsed = 0.0
+        total_usage: dict[str, int] = {}
+        last_error = "unknown local validation failure"
+        for schema_attempt in range(1, self.config.max_retries + 1):
+            decoded, _, elapsed = self._request(messages)
+            total_elapsed += elapsed
+            usage_raw = decoded.get("usage", {})
+            if isinstance(usage_raw, Mapping):
+                for key, value in usage_raw.items():
+                    if isinstance(value, int):
+                        total_usage[str(key)] = total_usage.get(str(key), 0) + value
+
+            choices = decoded.get("choices")
+            message = (
+                choices[0].get("message", {})
+                if isinstance(choices, list) and choices
+                else {}
             )
-        except PhysicalRewardProgramError as error:
-            raise LunaRewardManagerError(
-                f"Luna proposed an invalid physical reward: {error}"
-            ) from error
-        usage_raw = decoded.get("usage", {})
-        usage = (
-            {
-                str(key): int(value)
-                for key, value in usage_raw.items()
-                if isinstance(value, int)
-            }
-            if isinstance(usage_raw, Mapping)
-            else {}
-        )
-        return LunaProposal(
-            program=program,
-            response_id=(str(decoded["id"]) if decoded.get("id") is not None else None),
-            usage=usage,
-            elapsed_seconds=elapsed,
-            attempt=attempt,
+            response_text = (
+                message.get("content") if isinstance(message, Mapping) else None
+            )
+            try:
+                if not isinstance(response_text, str):
+                    raise LunaRewardManagerError("Luna response has no text content.")
+                raw_program = _extract_json_object(response_text)
+                program = validate_physical_reward_program(
+                    raw_program,
+                    available_keys=available_keys,
+                    expected_gamma=expected_gamma,
+                )
+            except (LunaRewardManagerError, PhysicalRewardProgramError) as error:
+                last_error = str(error)
+                if schema_attempt == self.config.max_retries:
+                    break
+                if isinstance(response_text, str):
+                    messages.append({"role": "assistant", "content": response_text})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "The proposed JSON failed local validation: "
+                            f"{last_error} Return the complete corrected reward program, "
+                            "not a patch. Follow every type_specific_fields entry and "
+                            "use only available_physical_keys."
+                        ),
+                    }
+                )
+                continue
+            return LunaProposal(
+                program=program,
+                response_id=(
+                    str(decoded["id"]) if decoded.get("id") is not None else None
+                ),
+                usage=total_usage,
+                elapsed_seconds=total_elapsed,
+                attempt=schema_attempt,
+            )
+        raise LunaRewardManagerError(
+            "Luna failed local reward validation after "
+            f"{self.config.max_retries} attempts: {last_error}"
         )
 
     def audit(self) -> dict[str, Any]:

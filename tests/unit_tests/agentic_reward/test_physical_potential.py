@@ -7,7 +7,10 @@ import numpy as np
 import pytest
 
 from rlinf.agents.enpire_reward.controller import RewardEvolutionController
-from rlinf.agents.enpire_reward.manager import LunaRewardManagerConfig
+from rlinf.agents.enpire_reward.manager import (
+    LunaRewardManager,
+    LunaRewardManagerConfig,
+)
 from rlinf.agents.enpire_reward.physical_potential import (
     PhysicalPotentialRewardRuntime,
     PhysicalRewardProgramError,
@@ -91,6 +94,52 @@ def test_validator_rejects_missing_coordinate_index():
         PhysicalRewardProgramError, match=r"term\[0\]\.index is required"
     ):
         validate_physical_reward_program(missing_index)
+
+
+def test_manager_retries_invalid_program_with_validator_feedback(monkeypatch):
+    invalid = _program(
+        potential_terms=[
+            {
+                "type": "height_delta",
+                "key": "object_pos",
+                "scale": 0.5,
+                "weight": 1.0,
+            }
+        ]
+    )
+    valid = _program()
+    responses = [invalid, valid]
+    observed_messages = []
+    manager = LunaRewardManager(LunaRewardManagerConfig(max_retries=2))
+
+    def fake_request(messages):
+        observed_messages.append(list(messages))
+        program = responses.pop(0)
+        return (
+            {
+                "id": f"response-{len(observed_messages)}",
+                "choices": [{"message": {"content": json.dumps(program)}}],
+                "usage": {"total_tokens": 10},
+            },
+            1,
+            0.1,
+        )
+
+    monkeypatch.setattr(manager, "_request", fake_request)
+    proposal = manager.propose(
+        scene_context={
+            "task_ids": [9],
+            "available_physical_keys": ["object_pos", "target_pos"],
+        },
+        current_program=valid,
+        experiment_history=[],
+        expected_gamma=0.99,
+    )
+
+    assert proposal.attempt == 2
+    assert proposal.usage["total_tokens"] == 20
+    assert proposal.program == validate_physical_reward_program(valid)
+    assert "term[0].index is required" in observed_messages[1][-1]["content"]
 
 
 def test_potential_progress_and_completion_hold(tmp_path):
