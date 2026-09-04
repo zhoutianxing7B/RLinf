@@ -188,6 +188,11 @@ class LunaRewardManager:
                     {
                         "type": ("distance, height_delta, scalar, or relative_scalar"),
                         "references": "available physical keys only",
+                        "axes": "required coordinate indices for distance",
+                        "index": (
+                            "required coordinate for height_delta/scalar/relative_scalar; "
+                            "for xyz positions, x=0, y=1, z=2 and height uses z=2"
+                        ),
                         "target": "required for scalar/relative_scalar",
                         "scale": "positive physical-unit scale",
                         "weight": "nonnegative; all weights sum <= 1",
@@ -205,6 +210,9 @@ class LunaRewardManager:
                 ),
                 "distance": "Euclidean separation over selected axes",
                 "height_delta": "positive displacement from the episode reset pose",
+                "coordinate_convention": (
+                    "position arrays are xyz in metres: x=0, y=1, z=2; z is up/height"
+                ),
             },
             "audit_semantics": {
                 "physical_completion_tp_once": (

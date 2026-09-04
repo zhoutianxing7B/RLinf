@@ -5,6 +5,12 @@
     9
   ],
   "task": "pick up the black bowl on the wooden cabinet and place it on the plate",
+  "coordinate_convention": {
+    "position_order": ["x", "y", "z"],
+    "vertical_axis": "z",
+    "vertical_index": 2,
+    "position_unit": "metre"
+  },
   "semantic_roles": {
     "movable_object": "akita_black_bowl_1_pos",
     "target_receptacle": "plate_1_pos",

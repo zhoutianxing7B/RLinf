@@ -76,6 +76,23 @@ def test_validator_rejects_leakage_and_gamma_mismatch():
         validate_physical_reward_program(_program(), expected_gamma=0.999)
 
 
+def test_validator_rejects_missing_coordinate_index():
+    missing_index = _program(
+        potential_terms=[
+            {
+                "type": "height_delta",
+                "key": "object_pos",
+                "scale": 0.5,
+                "weight": 1.0,
+            }
+        ]
+    )
+    with pytest.raises(
+        PhysicalRewardProgramError, match=r"term\[0\]\.index is required"
+    ):
+        validate_physical_reward_program(missing_index)
+
+
 def test_potential_progress_and_completion_hold(tmp_path):
     path = tmp_path / "reward.json"
     atomic_write_physical_reward_program(path, _program())

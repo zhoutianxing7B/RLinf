@@ -73,6 +73,22 @@ def _validate_reference(reference: Any, available_keys: set[str] | None) -> str:
     return reference
 
 
+def _require_index(raw: Mapping[str, Any], name: str) -> int:
+    if "index" not in raw:
+        raise PhysicalRewardProgramError(f"{name}.index is required.")
+    try:
+        index = int(raw["index"])
+    except (TypeError, ValueError) as error:
+        raise PhysicalRewardProgramError(
+            f"{name}.index must be an integer in [0, 6]."
+        ) from error
+    if isinstance(raw["index"], float) and raw["index"] != index:
+        raise PhysicalRewardProgramError(f"{name}.index must be an integer in [0, 6].")
+    if not 0 <= index <= 6:
+        raise PhysicalRewardProgramError(f"{name}.index must be an integer in [0, 6].")
+    return index
+
+
 def _validate_axes(raw_axes: Any) -> tuple[int, ...]:
     if not isinstance(raw_axes, Sequence) or isinstance(raw_axes, (str, bytes)):
         raise PhysicalRewardProgramError("axes must be a non-empty integer list.")
@@ -175,7 +191,7 @@ def validate_physical_reward_program(
             normalized.update(
                 {
                     "key": _validate_reference(raw.get("key"), key_set),
-                    "index": int(raw.get("index", 0)),
+                    "index": _require_index(raw, f"condition[{index}]"),
                 }
             )
         elif condition_type == "relative_scalar":
@@ -183,7 +199,7 @@ def validate_physical_reward_program(
                 {
                     "left": _validate_reference(raw.get("left"), key_set),
                     "right": _validate_reference(raw.get("right"), key_set),
-                    "index": int(raw.get("index", 0)),
+                    "index": _require_index(raw, f"condition[{index}]"),
                 }
             )
         else:
@@ -228,7 +244,7 @@ def validate_physical_reward_program(
             normalized.update(
                 {
                     "key": _validate_reference(raw.get("key"), key_set),
-                    "index": int(raw.get("index", 0)),
+                    "index": _require_index(raw, f"term[{index}]"),
                 }
             )
             if term_type == "scalar":
@@ -240,7 +256,7 @@ def validate_physical_reward_program(
                 {
                     "left": _validate_reference(raw.get("left"), key_set),
                     "right": _validate_reference(raw.get("right"), key_set),
-                    "index": int(raw.get("index", 0)),
+                    "index": _require_index(raw, f"term[{index}]"),
                     "target": _finite_float(raw.get("target"), f"term[{index}].target"),
                 }
             )
