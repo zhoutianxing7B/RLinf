@@ -542,6 +542,22 @@ class EmbodiedRunner:
                     if env_bootstrap_handle is not None:
                         env_bootstrap_handle.wait()
 
+                env_context_results = env_handle.wait()
+                env_context_metrics = compute_evaluate_metrics(
+                    [result for result in env_context_results if result is not None]
+                )
+                self.latest_training_context = {
+                    **{
+                        f"env/{key}": value
+                        for key, value in env_context_metrics.items()
+                    },
+                    **{
+                        f"train/{key}": value
+                        for key, value in self._aggregate_numeric_metrics(
+                            actor_training_metrics
+                        ).items()
+                    },
+                }
                 self.global_step += 1
                 eval_metrics = self._maybe_eval_and_checkpoint(_step)
 

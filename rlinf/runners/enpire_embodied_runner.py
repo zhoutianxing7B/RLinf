@@ -45,9 +45,11 @@ class ENPIREEmbodiedRunner(EmbodiedRunner):
         checkpoint_path = self._checkpoint_path()
         if not os.path.isdir(os.path.join(checkpoint_path, "actor")):
             self._save_checkpoint()
+        manager_metrics = dict(eval_metrics)
+        manager_metrics.update(getattr(self, "latest_training_context", {}))
         decision = self.reward_evolution.process_evaluation(
             step=self.global_step,
-            metrics=eval_metrics,
+            metrics=manager_metrics,
             checkpoint_path=checkpoint_path,
         )
         self.logger.info(
