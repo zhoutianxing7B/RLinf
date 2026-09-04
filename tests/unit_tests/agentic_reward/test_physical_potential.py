@@ -187,7 +187,9 @@ def test_controller_warmup_and_candidate_patience(tmp_path, monkeypatch):
         regression_tolerance=0.02,
         manager_config=LunaRewardManagerConfig(),
         baseline_warmup_evaluations=2,
-        candidate_patience_evaluations=2,
+        candidate_burn_in_evaluations=1,
+        candidate_min_evaluations=2,
+        candidate_patience_evaluations=3,
     )
     proposal_count = 0
 
@@ -223,13 +225,111 @@ def test_controller_warmup_and_candidate_patience(tmp_path, monkeypatch):
     third = controller.process_evaluation(
         step=15, metrics=metrics, checkpoint_path=tmp_path / "step15"
     )
-    assert third.action == "continue_candidate"
+    assert third.action == "candidate_burn_in"
     assert third.rollback_checkpoint is None
     assert not third.manager_called
 
     fourth = controller.process_evaluation(
         step=20, metrics=metrics, checkpoint_path=tmp_path / "step20"
     )
-    assert fourth.action == "rollback_no_gain"
-    assert fourth.rollback_checkpoint.endswith("step10")
-    assert fourth.manager_called
+    assert fourth.action == "continue_candidate"
+    assert fourth.rollback_checkpoint is None
+    assert not fourth.manager_called
+
+    fifth = controller.process_evaluation(
+        step=25, metrics=metrics, checkpoint_path=tmp_path / "step25"
+    )
+    assert fifth.action == "continue_candidate"
+    assert fifth.rollback_checkpoint is None
+    assert not fifth.manager_called
+
+    sixth = controller.process_evaluation(
+        step=30, metrics=metrics, checkpoint_path=tmp_path / "step30"
+    )
+    assert sixth.action == "rollback_no_gain"
+    assert sixth.rollback_checkpoint.endswith("step10")
+    assert sixth.manager_called
+
+
+def test_controller_accepts_stable_gain_then_consolidates(tmp_path, monkeypatch):
+    program_path = tmp_path / "reward.json"
+    scene_path = tmp_path / "scene.json"
+    atomic_write_physical_reward_program(program_path, _program())
+    scene_path.write_text(
+        json.dumps(
+            {
+                "task_ids": [9],
+                "available_physical_keys": ["object_pos", "target_pos"],
+            }
+        )
+    )
+    controller = RewardEvolutionController(
+        program_path=program_path,
+        scene_context_path=scene_path,
+        audit_dir=tmp_path / "audit",
+        expected_gamma=0.99,
+        score_keys=[],
+        score_panels={
+            "a": {"numerator": "a_success", "denominator": "a_mass"},
+            "b": {"numerator": "b_success", "denominator": "b_mass"},
+        },
+        target_score=0.7,
+        min_improvement=0.02,
+        regression_tolerance=0.02,
+        manager_config=LunaRewardManagerConfig(),
+        candidate_min_evaluations=2,
+        candidate_patience_evaluations=3,
+        champion_patience_evaluations=2,
+    )
+    proposal_count = 0
+
+    def fake_proposal():
+        nonlocal proposal_count
+        proposal_count += 1
+        digest = f"candidate-{proposal_count}"
+        controller.state["candidate_pending"] = True
+        controller.state["candidate_digest"] = digest
+        controller.state["candidate_evaluations"] = 0
+        return digest, {}
+
+    monkeypatch.setattr(controller, "_propose_next", fake_proposal)
+    baseline = {
+        "a_success": 0.05,
+        "a_mass": 0.5,
+        "b_success": 0.05,
+        "b_mass": 0.5,
+    }
+    improved = {
+        "a_success": 0.15,
+        "a_mass": 0.5,
+        "b_success": 0.15,
+        "b_mass": 0.5,
+    }
+
+    first = controller.process_evaluation(
+        step=5, metrics=baseline, checkpoint_path=tmp_path / "step5"
+    )
+    assert first.manager_called
+
+    second = controller.process_evaluation(
+        step=10, metrics=improved, checkpoint_path=tmp_path / "step10"
+    )
+    assert second.action == "continue_candidate"
+    assert not second.manager_called
+
+    third = controller.process_evaluation(
+        step=15, metrics=improved, checkpoint_path=tmp_path / "step15"
+    )
+    assert third.action == "accept"
+    assert not third.manager_called
+
+    fourth = controller.process_evaluation(
+        step=20, metrics=improved, checkpoint_path=tmp_path / "step20"
+    )
+    assert fourth.action == "champion_continue"
+    assert not fourth.manager_called
+
+    fifth = controller.process_evaluation(
+        step=25, metrics=improved, checkpoint_path=tmp_path / "step25"
+    )
+    assert fifth.action == "champion_plateau"

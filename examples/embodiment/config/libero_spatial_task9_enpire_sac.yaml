@@ -199,7 +199,13 @@ agentic_reward:
     min_improvement: 0.02
     regression_tolerance: 0.02
     baseline_warmup_evaluations: 4
+    # A revision clears replay. Burn Q in before scoring actor learning.
+    candidate_burn_in_evaluations: 1
+    # Require consecutive evidence so one noisy fixed-panel result cannot win.
+    candidate_min_evaluations: 2
     candidate_patience_evaluations: 4
+    # Consolidate an accepted reward before asking Luna for another rewrite.
+    champion_patience_evaluations: 2
     manager:
       base_url: "https://maimai.it.com"
       model: "gpt-5.6-luna"

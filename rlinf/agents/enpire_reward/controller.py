@@ -64,7 +64,10 @@ class RewardEvolutionController:
         regression_tolerance: float,
         manager_config: LunaRewardManagerConfig,
         baseline_warmup_evaluations: int = 1,
+        candidate_burn_in_evaluations: int = 0,
+        candidate_min_evaluations: int = 1,
         candidate_patience_evaluations: int = 1,
+        champion_patience_evaluations: int = 2,
     ) -> None:
         self.program_path = Path(program_path)
         self.scene_context_path = Path(scene_context_path)
@@ -81,11 +84,26 @@ class RewardEvolutionController:
         self.min_improvement = float(min_improvement)
         self.regression_tolerance = float(regression_tolerance)
         self.baseline_warmup_evaluations = int(baseline_warmup_evaluations)
+        self.candidate_burn_in_evaluations = int(candidate_burn_in_evaluations)
+        self.candidate_min_evaluations = int(candidate_min_evaluations)
         self.candidate_patience_evaluations = int(candidate_patience_evaluations)
+        self.champion_patience_evaluations = int(champion_patience_evaluations)
         if self.baseline_warmup_evaluations < 1:
             raise ValueError("baseline_warmup_evaluations must be positive.")
         if self.candidate_patience_evaluations < 1:
             raise ValueError("candidate_patience_evaluations must be positive.")
+        if self.candidate_burn_in_evaluations < 0:
+            raise ValueError("candidate_burn_in_evaluations must be non-negative.")
+        if (
+            not 1
+            <= self.candidate_min_evaluations
+            <= self.candidate_patience_evaluations
+        ):
+            raise ValueError(
+                "candidate_min_evaluations must be in [1, candidate_patience_evaluations]."
+            )
+        if self.champion_patience_evaluations < 1:
+            raise ValueError("champion_patience_evaluations must be positive.")
         if not self.score_keys and not self.score_panels:
             raise ValueError("Agentic reward requires score keys or score panels.")
         self.scene_context = json.loads(self.scene_context_path.read_text())
@@ -108,14 +126,20 @@ class RewardEvolutionController:
                 "candidate_pending": False,
                 "candidate_digest": None,
                 "candidate_evaluations": 0,
+                "candidate_burn_in_completed": 0,
+                "candidate_recent_scores": [],
                 "baseline_evaluations": 0,
+                "champion_stale_evaluations": 0,
                 "manager_cycle_started": False,
                 "experiments": [],
                 "manager": self.manager.audit(),
             }
             self._save_state()
         self.state.setdefault("candidate_evaluations", 0)
+        self.state.setdefault("candidate_burn_in_completed", 0)
+        self.state.setdefault("candidate_recent_scores", [])
         self.state.setdefault("baseline_evaluations", 0)
+        self.state.setdefault("champion_stale_evaluations", 0)
         self.state.setdefault("manager_cycle_started", False)
 
     @classmethod
@@ -133,11 +157,16 @@ class RewardEvolutionController:
             target_score=config.get("target_score", 0.7),
             min_improvement=config.get("min_improvement", 0.02),
             regression_tolerance=config.get("regression_tolerance", 0.02),
-            baseline_warmup_evaluations=config.get(
-                "baseline_warmup_evaluations", 1
-            ),
+            baseline_warmup_evaluations=config.get("baseline_warmup_evaluations", 1),
             candidate_patience_evaluations=config.get(
                 "candidate_patience_evaluations", 1
+            ),
+            candidate_burn_in_evaluations=config.get(
+                "candidate_burn_in_evaluations", 0
+            ),
+            candidate_min_evaluations=config.get("candidate_min_evaluations", 1),
+            champion_patience_evaluations=config.get(
+                "champion_patience_evaluations", 2
             ),
             manager_config=LunaRewardManagerConfig(
                 base_url=manager.get("base_url", "https://maimai.it.com"),
@@ -208,6 +237,9 @@ class RewardEvolutionController:
         self.state["candidate_pending"] = True
         self.state["candidate_digest"] = digest
         self.state["candidate_evaluations"] = 0
+        self.state["candidate_burn_in_completed"] = 0
+        self.state["candidate_recent_scores"] = []
+        self.state["champion_stale_evaluations"] = 0
         self.state["manager"] = self.manager.audit()
         event = {
             "kind": "proposal",
@@ -245,45 +277,78 @@ class RewardEvolutionController:
                 self.state["manager_cycle_started"] = True
                 cycle_started = True
         elif self.state["candidate_pending"]:
-            candidate_evaluations = int(self.state["candidate_evaluations"]) + 1
-            self.state["candidate_evaluations"] = candidate_evaluations
-            candidate_evaluation = candidate_evaluations
-            champion_score = float(self.state["champion_score"])
-            improvement = score - champion_score
-            if improvement >= self.min_improvement:
-                action = "accept"
-                self.state["champion_score"] = score
-                self.state["champion_checkpoint"] = checkpoint_path
-                self.state["champion_program"] = json.loads(
-                    self.program_path.read_text()
-                )
-                self.state["candidate_pending"] = False
-            elif improvement < -self.regression_tolerance:
-                action = "rollback_regression"
-                rollback_checkpoint = self.state["champion_checkpoint"]
-                atomic_write_physical_reward_program(
-                    self.program_path, self.state["champion_program"]
-                )
-                self.state["candidate_pending"] = False
-            elif candidate_evaluations < self.candidate_patience_evaluations:
-                action = "continue_candidate"
+            burn_in_completed = int(self.state["candidate_burn_in_completed"])
+            if burn_in_completed < self.candidate_burn_in_evaluations:
+                burn_in_completed += 1
+                self.state["candidate_burn_in_completed"] = burn_in_completed
+                action = "candidate_burn_in"
             else:
-                action = "rollback_no_gain"
-                rollback_checkpoint = self.state["champion_checkpoint"]
-                atomic_write_physical_reward_program(
-                    self.program_path, self.state["champion_program"]
+                candidate_evaluations = int(self.state["candidate_evaluations"]) + 1
+                self.state["candidate_evaluations"] = candidate_evaluations
+                candidate_evaluation = candidate_evaluations
+                recent_scores = list(self.state["candidate_recent_scores"])
+                recent_scores.append(score)
+                recent_scores = recent_scores[-self.candidate_min_evaluations :]
+                self.state["candidate_recent_scores"] = recent_scores
+                champion_score = float(self.state["champion_score"])
+                enough_evidence = (
+                    candidate_evaluations >= self.candidate_min_evaluations
                 )
-                self.state["candidate_pending"] = False
+                stable_improvement = enough_evidence and all(
+                    value - champion_score >= self.min_improvement
+                    for value in recent_scores
+                )
+                stable_regression = enough_evidence and all(
+                    value - champion_score < -self.regression_tolerance
+                    for value in recent_scores
+                )
+                if stable_improvement:
+                    action = "accept"
+                    self.state["champion_score"] = min(recent_scores)
+                    self.state["champion_checkpoint"] = checkpoint_path
+                    self.state["champion_program"] = json.loads(
+                        self.program_path.read_text()
+                    )
+                    self.state["champion_stale_evaluations"] = 0
+                    self.state["candidate_pending"] = False
+                elif stable_regression:
+                    action = "rollback_regression"
+                    rollback_checkpoint = self.state["champion_checkpoint"]
+                    atomic_write_physical_reward_program(
+                        self.program_path, self.state["champion_program"]
+                    )
+                    self.state["candidate_pending"] = False
+                elif candidate_evaluations < self.candidate_patience_evaluations:
+                    action = "continue_candidate"
+                else:
+                    action = "rollback_no_gain"
+                    rollback_checkpoint = self.state["champion_checkpoint"]
+                    atomic_write_physical_reward_program(
+                        self.program_path, self.state["champion_program"]
+                    )
+                    self.state["candidate_pending"] = False
 
             if not self.state["candidate_pending"]:
                 self.state["candidate_digest"] = None
                 self.state["candidate_evaluations"] = 0
+                self.state["candidate_burn_in_completed"] = 0
+                self.state["candidate_recent_scores"] = []
         else:
             action = "champion_continue"
             champion_score = float(self.state["champion_score"])
-            if score >= champion_score:
+            if score >= champion_score + self.min_improvement:
                 self.state["champion_score"] = score
                 self.state["champion_checkpoint"] = checkpoint_path
+                self.state["champion_stale_evaluations"] = 0
+            else:
+                stale_evaluations = int(self.state["champion_stale_evaluations"]) + 1
+                self.state["champion_stale_evaluations"] = stale_evaluations
+                if stale_evaluations >= self.champion_patience_evaluations:
+                    if score < champion_score - self.regression_tolerance:
+                        action = "rollback_champion_regression"
+                        rollback_checkpoint = self.state["champion_checkpoint"]
+                    else:
+                        action = "champion_plateau"
 
         experiment = {
             "kind": "evaluation",
@@ -294,6 +359,9 @@ class RewardEvolutionController:
             "checkpoint_path": checkpoint_path,
             "rollback_checkpoint": rollback_checkpoint,
             "candidate_evaluation": candidate_evaluation,
+            "candidate_burn_in_completed": int(
+                self.state["candidate_burn_in_completed"]
+            ),
             "metrics": {
                 str(key): _json_scalar(value) for key, value in metrics.items()
             },
@@ -304,10 +372,18 @@ class RewardEvolutionController:
         champion_score = float(self.state["champion_score"])
         candidate_digest = None
         manager_called = False
+        propose_after = {
+            "baseline",
+            "rollback_regression",
+            "rollback_no_gain",
+            "rollback_champion_regression",
+            "champion_plateau",
+        }
         if (
             cycle_started
             and not self.state["candidate_pending"]
             and champion_score < self.target_score
+            and action in propose_after
         ):
             candidate_digest, _ = self._propose_next()
             manager_called = candidate_digest is not None
