@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "benchmark": "libero_spatial",
+  "task_ids": [
+    9
+  ],
+  "task": "pick up the black bowl on the wooden cabinet and place it on the plate",
+  "semantic_roles": {
+    "movable_object": "akita_black_bowl_1_pos",
+    "target_receptacle": "plate_1_pos",
+    "distractor_object": "akita_black_bowl_2_pos",
+    "end_effector": "robot0_eef_pos"
+  },
+  "available_physical_keys": [
+    "akita_black_bowl_1_pos",
+    "akita_black_bowl_1_quat",
+    "akita_black_bowl_2_pos",
+    "akita_black_bowl_2_quat",
+    "cookies_1_pos",
+    "cookies_1_quat",
+    "glazed_rim_porcelain_ramekin_1_pos",
+    "glazed_rim_porcelain_ramekin_1_quat",
+    "plate_1_pos",
+    "plate_1_quat",
+    "robot0_eef_pos",
+    "robot0_eef_quat",
+    "robot0_gripper_qpos",
+    "robot0_gripper_qvel",
+    "robot0_joint_pos",
+    "robot0_joint_vel"
+  ],
+  "real_robot_mapping": {
+    "*_pos": "calibrated RGB-D 6D object tracker translation",
+    "*_quat": "calibrated RGB-D 6D object tracker orientation",
+    "robot0_eef_pos": "robot forward kinematics",
+    "robot0_eef_quat": "robot forward kinematics",
+    "robot0_gripper_qpos": "gripper encoder",
+    "robot0_gripper_qvel": "gripper encoder velocity",
+    "robot0_joint_pos": "joint encoders",
+    "robot0_joint_vel": "joint encoder velocity"
+  },
+  "initial_probe": {
+    "movable_object_xyz_m": [
+      0.03896,
+      -0.26518,
+      1.1264
+    ],
+    "target_xyz_m": [
+      0.04823,
+      0.2147,
+      0.9025
+    ]
+  }
+}

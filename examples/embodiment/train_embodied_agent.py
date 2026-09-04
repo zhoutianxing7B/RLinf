@@ -160,7 +160,13 @@ def main(cfg) -> None:
             placement_strategy=reward_placement,
         )
 
-    runner = EmbodiedRunner(
+    runner_cls = EmbodiedRunner
+    if cfg.get("agentic_reward", {}).get("enabled", False):
+        from rlinf.runners.enpire_embodied_runner import ENPIREEmbodiedRunner
+
+        runner_cls = ENPIREEmbodiedRunner
+
+    runner = runner_cls(
         cfg=cfg,
         actor=actor_group,
         rollout=rollout_group,

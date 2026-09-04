@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "name": "task9_physical_pbrs_seed",
+  "rationale": "Reward stable bowl-on-plate occupancy and shape approach, lift, and transport with a bounded potential difference.",
+  "task_ids": [
+    9
+  ],
+  "gamma": 0.999,
+  "completion_bonus": 1.0,
+  "completion_hold_steps": 3,
+  "completion_conditions": [
+    {
+      "type": "distance",
+      "left": "akita_black_bowl_1_pos",
+      "right": "plate_1_pos",
+      "axes": [
+        0,
+        1
+      ],
+      "op": "lt",
+      "threshold": 0.07
+    },
+    {
+      "type": "distance",
+      "left": "akita_black_bowl_1_pos",
+      "right": "plate_1_pos",
+      "axes": [
+        2
+      ],
+      "op": "lt",
+      "threshold": 0.12
+    }
+  ],
+  "potential_scale": 0.2,
+  "potential_terms": [
+    {
+      "type": "distance",
+      "left": "robot0_eef_pos",
+      "right": "akita_black_bowl_1_pos",
+      "axes": [
+        0,
+        1,
+        2
+      ],
+      "scale": 0.15,
+      "weight": 0.25
+    },
+    {
+      "type": "height_delta",
+      "key": "akita_black_bowl_1_pos",
+      "index": 2,
+      "scale": 0.1,
+      "weight": 0.25
+    },
+    {
+      "type": "distance",
+      "left": "akita_black_bowl_1_pos",
+      "right": "plate_1_pos",
+      "axes": [
+        0,
+        1,
+        2
+      ],
+      "scale": 0.2,
+      "weight": 0.5
+    }
+  ]
+}

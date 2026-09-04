@@ -22,6 +22,7 @@ import torch.nn.functional as F
 from omegaconf import DictConfig
 from torch.utils.data import DataLoader
 
+from rlinf.algorithms.sac_utils import discounted_chunk_rewards
 from rlinf.config import SupportedModel
 from rlinf.data.schema.embodied_types import Trajectory
 from rlinf.data.storage.replay import (
@@ -310,6 +311,11 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
                         )
                         target_param.data.copy_(shadow.to(target_param.data.dtype))
 
+    def clear_replay_buffer(self) -> dict[str, float]:
+        """Drop transitions labeled by an obsolete reward revision."""
+        self.replay_buffer.clear()
+        return self.replay_buffer.get_stats()
+
     @Worker.timer("actor/recv_traj")
     async def recv_rollout_trajectories(self, input_channel: Channel) -> None:
         """
@@ -354,9 +360,11 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
             discount = self.cfg.algorithm.gamma**num_action_chunks
             rewards_for_bootstrap = batch["rewards"][:, 0:1].to(self.torch_dtype)
         else:
-            discount = self.cfg.algorithm.gamma
-            rewards_for_bootstrap = (
-                batch["rewards"].sum(dim=-1, keepdim=True).to(self.torch_dtype)
+            chunk_rewards = batch["rewards"].to(self.torch_dtype)
+            chunk_length = chunk_rewards.shape[-1]
+            discount = self.cfg.algorithm.gamma**chunk_length
+            rewards_for_bootstrap = discounted_chunk_rewards(
+                chunk_rewards, self.cfg.algorithm.gamma
             )
         terminations = batch["terminations"].to(self.torch_dtype)
 

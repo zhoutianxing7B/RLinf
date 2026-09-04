@@ -129,7 +129,8 @@ class CNNPolicy(nn.Module, BasePolicy):
             init_mlp_weights(self.mix_proj, nonlinearity="tanh")
 
             self.actor_mean = layer_init(
-                nn.Linear(256, self.cfg.action_dim), std=0.01 * np.sqrt(2)
+                nn.Linear(256, self.cfg.action_dim * self.cfg.num_action_chunks),
+                std=0.01 * np.sqrt(2),
             )
 
         assert self.cfg.add_value_head + self.cfg.add_q_head <= 1
@@ -146,19 +147,23 @@ class CNNPolicy(nn.Module, BasePolicy):
                     hidden_size=hidden_size,
                     hidden_dims=hidden_dims,
                     num_q_heads=self.cfg.num_q_heads,
-                    action_feature_dim=self.cfg.action_dim,
+                    action_feature_dim=self.cfg.action_dim * self.cfg.num_action_chunks,
                 )
             elif self.cfg.q_head_type == "crossq":
                 self.q_head = MultiCrossQHead(
                     hidden_size=hidden_size,
                     hidden_dims=hidden_dims,
                     num_q_heads=self.cfg.num_q_heads,
-                    action_feature_dim=self.cfg.action_dim,
+                    action_feature_dim=self.cfg.action_dim * self.cfg.num_action_chunks,
                 )
         if self.cfg.independent_std:
-            self.actor_logstd = nn.Parameter(torch.ones(1, self.cfg.action_dim) * -0.5)
+            self.actor_logstd = nn.Parameter(
+                torch.ones(1, self.cfg.action_dim * self.cfg.num_action_chunks) * -0.5
+            )
         else:
-            self.actor_logstd = layer_init(nn.Linear(256, self.cfg.action_dim))
+            self.actor_logstd = layer_init(
+                nn.Linear(256, self.cfg.action_dim * self.cfg.num_action_chunks)
+            )
 
         if self.cfg.action_scale is not None:
             l, h = self.cfg.action_scale
@@ -230,14 +235,20 @@ class CNNPolicy(nn.Module, BasePolicy):
         device = next(self.parameters()).device
         mean = self.img_mean.to(device)
         std = self.img_std.to(device)
+        extra_view_images = env_obs.get("extra_view_images")
+        if extra_view_images is None and env_obs.get("wrist_images") is not None:
+            wrist_images = env_obs["wrist_images"]
+            extra_view_images = (
+                wrist_images.unsqueeze(1) if wrist_images.ndim == 4 else wrist_images
+            )
 
         processed_env_obs = {}
         processed_env_obs["states"] = env_obs["states"].clone().to(device)
         x = env_obs["main_images"].clone().to(device).float() / 255.0
         processed_env_obs["main_images"] = (x - mean) / std
 
-        if env_obs.get("extra_view_images", None) is not None:
-            ex = env_obs["extra_view_images"].clone().to(device).float() / 255.0
+        if extra_view_images is not None:
+            ex = extra_view_images.clone().to(device).float() / 255.0
             ex = (ex - mean.unsqueeze(1)) / std.unsqueeze(1)
             processed_env_obs["extra_view_images"] = ex
 
@@ -423,11 +434,11 @@ class CNNPolicy(nn.Module, BasePolicy):
         if return_obs:
             forward_inputs["main_images"] = env_obs["main_images"]
             forward_inputs["states"] = env_obs["states"]
-            if (
-                "extra_view_images" in env_obs
-                and env_obs["extra_view_images"] is not None
-            ):
-                forward_inputs["extra_view_images"] = env_obs["extra_view_images"]
+            extra_view_images = env_obs.get(
+                "extra_view_images", env_obs.get("wrist_images")
+            )
+            if extra_view_images is not None:
+                forward_inputs["extra_view_images"] = extra_view_images
 
         result = {
             "prev_logprobs": chunk_logprobs,

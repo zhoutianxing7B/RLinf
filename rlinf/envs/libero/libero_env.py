@@ -171,6 +171,22 @@ class LiberoEnv(gym.Env):
         self.use_rel_reward = cfg.use_rel_reward
         self.use_step_penalty = getattr(cfg, "use_step_penalty", False)
 
+        self.agentic_reward = None
+        agentic_reward_cfg = cfg.get("agentic_reward", None)
+        if agentic_reward_cfg is not None and agentic_reward_cfg.get("enabled", False):
+            from rlinf.agents.enpire_reward.physical_potential import (
+                PhysicalPotentialRewardRuntime,
+            )
+
+            self.agentic_reward = PhysicalPotentialRewardRuntime(
+                agentic_reward_cfg.program_path,
+                num_envs=self.num_envs,
+                expected_gamma=agentic_reward_cfg.gamma,
+                reload_interval_steps=agentic_reward_cfg.get(
+                    "reload_interval_steps", 16
+                ),
+            )
+
         self._init_metrics()
         self._elapsed_steps = np.zeros(self.num_envs, dtype=np.int32)
 
@@ -703,6 +719,9 @@ class LiberoEnv(gym.Env):
         self.fail_once = np.zeros(self.num_envs, dtype=bool)
         self.returns = np.zeros(self.num_envs)
         self.success_episode_len = np.zeros(self.num_envs, dtype=np.int32)
+        self.agentic_completion_return = np.zeros(self.num_envs)
+        self.agentic_potential_delta_return = np.zeros(self.num_envs)
+        self.agentic_potential = np.zeros(self.num_envs)
         self._task_success_stats: dict[int, dict[str, int]] = {}
         self._eval_seen_trials: set[tuple[int, int]] = set()
 
@@ -715,6 +734,9 @@ class LiberoEnv(gym.Env):
             self.fail_once[mask] = False
             self.returns[mask] = 0
             self.success_episode_len[mask] = 0
+            self.agentic_completion_return[mask] = 0.0
+            self.agentic_potential_delta_return[mask] = 0.0
+            self.agentic_potential[mask] = 0.0
             self._elapsed_steps[env_idx] = 0
         else:
             self.prev_step_reward[:] = 0
@@ -722,9 +744,12 @@ class LiberoEnv(gym.Env):
             self.fail_once[:] = False
             self.returns[:] = 0.0
             self.success_episode_len[:] = 0
+            self.agentic_completion_return[:] = 0.0
+            self.agentic_potential_delta_return[:] = 0.0
+            self.agentic_potential[:] = 0.0
             self._elapsed_steps[:] = 0
 
-    def _record_metrics(self, step_reward, terminations, infos):
+    def _record_metrics(self, step_reward, terminations, infos, agentic_step=None):
         episode_info = {}
         # Only accumulate returns while not yet succeeded
         self.returns += step_reward * (~self.success_once)
@@ -739,6 +764,13 @@ class LiberoEnv(gym.Env):
         episode_info["success_once"] = self.success_once.copy()
         episode_info["return"] = self.returns.copy()
         episode_info["episode_len"] = self.elapsed_steps.copy()
+        if self.is_eval:
+            panel_a = self.trial_ids % 2 == 0
+            panel_b = ~panel_a
+            episode_info["panel_a_success_mass"] = self.success_once * panel_a
+            episode_info["panel_a_mass"] = panel_a.astype(np.float32)
+            episode_info["panel_b_success_mass"] = self.success_once * panel_b
+            episode_info["panel_b_mass"] = panel_b.astype(np.float32)
 
         # Use success episode_len for reward if already succeeded, else current elapsed
         episode_len_for_reward = np.where(
@@ -747,6 +779,20 @@ class LiberoEnv(gym.Env):
         episode_info["reward"] = episode_info["return"] / np.maximum(
             episode_len_for_reward, 1
         )
+        if agentic_step is not None:
+            self.agentic_completion_return += agentic_step.completion
+            self.agentic_potential_delta_return += agentic_step.potential_delta
+            self.agentic_potential = agentic_step.potential.astype(np.float64)
+            episode_info["physical_completion_occupancy"] = (
+                self.agentic_completion_return.copy()
+            )
+            episode_info["physical_potential_delta"] = (
+                self.agentic_potential_delta_return.copy()
+            )
+            episode_info["physical_potential"] = self.agentic_potential.copy()
+            episode_info["physical_reward_revision"] = np.full(
+                self.num_envs, agentic_step.revision, dtype=np.int32
+            )
         infos["episode"] = to_tensor(episode_info)
         return infos
 
@@ -854,6 +900,9 @@ class LiberoEnv(gym.Env):
         for i, idx in enumerate(env_idx):
             self.current_raw_obs[idx] = raw_obs[i]
 
+        if self.agentic_reward is not None:
+            self.agentic_reward.reset(raw_obs, env_indices=env_idx)
+
         obs = self._wrap_obs(self.current_raw_obs)
         self._reset_metrics(env_idx)
         infos = {}
@@ -904,9 +953,32 @@ class LiberoEnv(gym.Env):
         truncations = self.elapsed_steps >= self.cfg.max_episode_steps
         obs = None if _skip_obs_wrap else self._wrap_obs(raw_obs)
 
-        step_reward = self._calc_step_reward(terminations)
+        agentic_step = None
+        if self.agentic_reward is None:
+            step_reward = self._calc_step_reward(terminations)
+        else:
+            agentic_step = self.agentic_reward.compute(
+                raw_obs,
+                self.task_ids,
+                # SAC bootstraps through time-limit truncation. Keeping Phi(s')
+                # here makes the shaped reward consistent with that target.
+                terminal=None,
+            )
+            step_reward = agentic_step.rewards
+            infos["agentic_reward"] = to_tensor(
+                {
+                    "completion": agentic_step.completion,
+                    "potential": agentic_step.potential,
+                    "potential_delta": agentic_step.potential_delta,
+                    "revision": np.full(
+                        self.num_envs, agentic_step.revision, dtype=np.int32
+                    ),
+                }
+            )
 
-        infos = self._record_metrics(step_reward, terminations, infos)
+        infos = self._record_metrics(
+            step_reward, terminations, infos, agentic_step=agentic_step
+        )
         if self.ignore_terminations:
             infos["episode"]["success_at_end"] = to_tensor(terminations)
             terminations[:] = False
