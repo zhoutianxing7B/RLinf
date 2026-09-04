@@ -400,5 +400,114 @@
       ]
     },
     "terminal_action": "rollback_regression"
+  },
+  {
+    "digest": "16f771dbb209e5280faf2efd8badf7326a94ef04f4b30582f97657956194443d",
+    "evaluations": [
+      {
+        "action": "candidate_burn_in",
+        "physical_fn_once": 0.0,
+        "physical_fp_once": 0.10000000149011612,
+        "physical_tp_once": 0.375,
+        "q_data": 5.904461860656738,
+        "score": 0.3799999952316284,
+        "score_panel": {
+          "reset_panel_a": 0.3799999952316284,
+          "reset_panel_b": 0.46000000834465027
+        },
+        "step": 10
+      },
+      {
+        "action": "continue_candidate",
+        "physical_fn_once": 0.0,
+        "physical_fp_once": 0.02500000037252903,
+        "physical_tp_once": 0.42500001192092896,
+        "q_data": 10.100858688354492,
+        "score": 0.3400000035762787,
+        "score_panel": {
+          "reset_panel_a": 0.3799999952316284,
+          "reset_panel_b": 0.3400000035762787
+        },
+        "step": 15
+      }
+    ],
+    "program": {
+      "completion_bonus": 1.0,
+      "completion_conditions": [
+        {
+          "axes": [
+            0,
+            1
+          ],
+          "left": "akita_black_bowl_1_pos",
+          "op": "lt",
+          "right": "plate_1_pos",
+          "threshold": 0.07,
+          "type": "distance"
+        },
+        {
+          "index": 2,
+          "left": "akita_black_bowl_1_pos",
+          "op": "gt",
+          "right": "plate_1_pos",
+          "threshold": 0.006,
+          "type": "relative_scalar"
+        },
+        {
+          "axes": [
+            0,
+            1,
+            2
+          ],
+          "key": "akita_black_bowl_1_pos",
+          "op": "lt",
+          "threshold": 0.008,
+          "type": "delta_distance"
+        }
+      ],
+      "completion_hold_steps": 6,
+      "gamma": 0.999,
+      "name": "task9_signed_height_settle",
+      "potential_scale": 0.18,
+      "potential_terms": [
+        {
+          "axes": [
+            0,
+            1,
+            2
+          ],
+          "left": "robot0_eef_pos",
+          "right": "akita_black_bowl_1_pos",
+          "scale": 0.15,
+          "type": "distance",
+          "weight": 0.25
+        },
+        {
+          "index": 2,
+          "key": "akita_black_bowl_1_pos",
+          "scale": 0.1,
+          "type": "height_delta",
+          "weight": 0.25
+        },
+        {
+          "axes": [
+            0,
+            1
+          ],
+          "left": "akita_black_bowl_1_pos",
+          "right": "plate_1_pos",
+          "scale": 0.12,
+          "type": "distance",
+          "weight": 0.5
+        }
+      ],
+      "rationale": "Use a structurally different placement gate: signed bowl-above-plate height, XY alignment, and low inter-frame bowl motion held for six frames. The baseline shows XY is the weak gate while absolute vertical separation can accept incorrect configurations; prior tighter stability variants reduced learnability, so use moderate tolerances, a longer physical settle hold, and XY-only transport shaping with bounded approach and lift terms.",
+      "schema_version": 1,
+      "task_ids": [
+        9
+      ]
+    },
+    "terminal_action": "stopped_actor_instability",
+    "termination_reason": "Verifier TP/FP/FN reached 0.425/0.025/0.0, but fixed-panel minimum fell from 0.44 to 0.34 as q_data reached 10.10; stabilize SAC actor updates before testing further reward revisions."
   }
 ]

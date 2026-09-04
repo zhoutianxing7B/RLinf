@@ -50,10 +50,11 @@ algorithm:
   actor_agg_q: min
   backup_entropy: false
   critic_subsample_size: 0
-  critic_actor_ratio: 8
+  # Limit policy drift while the fresh critic calibrates to a reward revision.
+  critic_actor_ratio: 16
   critic_update_shared_encoder: false
   actor_trainable_modules: [actor_mean, actor_logstd]
-  actor_behavior_coefficient: 100.0
+  actor_behavior_coefficient: 300.0
   bootstrap_type: standard
   gamma: 0.999
   tau: 0.005
@@ -178,7 +179,7 @@ actor:
     warmup_action_std: 0.05
     std_range: [0.02, 0.10]
   optim:
-    lr: 3.0e-6
+    lr: 1.0e-6
     adam_beta1: 0.9
     adam_beta2: 0.96
     adam_eps: 1.0e-08
@@ -203,7 +204,7 @@ agentic_reward:
   controller:
     program_path: "${env.train.agentic_reward.program_path}"
     scene_context_path: "examples/agentic_reward/scenes/libero_spatial_task9.json"
-    bootstrap_reward_history_path: "examples/agentic_reward/history/libero_spatial_task9_v14_trials.json"
+    bootstrap_reward_history_path: "examples/agentic_reward/history/libero_spatial_task9_trials.json"
     audit_dir: "${oc.env:ENPIRE_AUDIT_DIR,${runner.logger.log_path}/${runner.logger.experiment_name}/agentic_audit}"
     gamma: ${algorithm.gamma}
     score_keys: []
