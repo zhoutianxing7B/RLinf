@@ -50,6 +50,7 @@ algorithm:
   backup_entropy: false
   critic_subsample_size: 0
   critic_actor_ratio: 4
+  critic_update_shared_encoder: false
   bootstrap_type: standard
   gamma: 0.999
   tau: 0.005

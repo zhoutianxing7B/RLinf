@@ -157,7 +157,15 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
                 "critic": ["critic_image_encoder", "critic_state_encoder", "q_head"]
             }
         else:
-            param_filters = {"critic": ["encoders", "encoder", "q_head", "state_proj"]}
+            critic_filters = ["q_head"]
+            if self.cfg.algorithm.get("critic_update_shared_encoder", True):
+                critic_filters = [
+                    "encoders",
+                    "encoder",
+                    "q_head",
+                    "state_proj",
+                ]
+            param_filters = {"critic": critic_filters}
         filtered_optim_config = {"critic": self.cfg.actor.critic_optim}
         optimizers = self.build_optimizers(
             model=self.model,

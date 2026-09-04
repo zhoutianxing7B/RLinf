@@ -217,6 +217,11 @@ class LunaRewardManager:
                     "robot RL loop. Return exactly one JSON reward program. "
                     "Improve learnability while preserving the physical "
                     "completion objective. Diagnose measured failure history. "
+                    "Explicitly compare physical completion occupancy against "
+                    "simulator success: high occupancy with low success means "
+                    "the physical completion proxy has false positives and must "
+                    "be tightened rather than amplified. Low occupancy with low "
+                    "success instead calls for better potential shaping. "
                     "Do not invent unavailable signals, code, hard curricula, "
                     "or policy actions."
                 ),
