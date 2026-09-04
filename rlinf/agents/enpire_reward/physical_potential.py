@@ -43,6 +43,9 @@ _SUPPORTED_COMPLETION_REWARD_MODES = frozenset(
     {"capped_occupancy", "first_onset", "occupancy"}
 )
 _MAX_COMPONENTS = 8
+_MIN_COMPLETION_BONUS = 1.0
+_MAX_COMPLETION_BONUS = 10.0
+_MAX_CAPPED_COMPLETION_RETURN = 20.0
 
 
 class PhysicalRewardProgramError(ValueError):
@@ -140,8 +143,8 @@ def validate_physical_reward_program(
     completion_bonus = _finite_float(
         program.get("completion_bonus", 1.0), "completion_bonus"
     )
-    if not math.isclose(completion_bonus, 1.0, rel_tol=0.0, abs_tol=1e-9):
-        raise PhysicalRewardProgramError("completion_bonus must equal 1.0.")
+    if not _MIN_COMPLETION_BONUS <= completion_bonus <= _MAX_COMPLETION_BONUS:
+        raise PhysicalRewardProgramError("completion_bonus must be in [1, 10].")
     hold_steps = int(program.get("completion_hold_steps", 1))
     if not 1 <= hold_steps <= 32:
         raise PhysicalRewardProgramError("completion_hold_steps must be in [1, 32].")
@@ -169,6 +172,18 @@ def validate_physical_reward_program(
                 "completion_reward_cap_steps must be an integer in [2, 32] "
                 "for capped_occupancy."
             )
+        if completion_bonus * completion_reward_cap_steps > (
+            _MAX_CAPPED_COMPLETION_RETURN
+        ):
+            raise PhysicalRewardProgramError(
+                "capped completion bonus return must not exceed 20."
+            )
+    elif completion_reward_mode == "occupancy" and not math.isclose(
+        completion_bonus, 1.0, rel_tol=0.0, abs_tol=1e-9
+    ):
+        raise PhysicalRewardProgramError(
+            "occupancy completion_bonus must equal 1 to bound Q growth."
+        )
     potential_scale = _finite_float(
         program.get("potential_scale", 0.1), "potential_scale"
     )

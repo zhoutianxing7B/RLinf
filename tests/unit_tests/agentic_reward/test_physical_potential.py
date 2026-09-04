@@ -550,9 +550,36 @@ def test_validator_bounds_audit_component_count():
         validate_physical_reward_program(_program(completion_conditions=conditions))
 
 
-def test_completion_bonus_is_fixed_for_comparable_elite_threshold():
-    with pytest.raises(PhysicalRewardProgramError, match="must equal 1.0"):
-        validate_physical_reward_program(_program(completion_bonus=2.0))
+@pytest.mark.parametrize("bonus", [0.99, 10.01])
+def test_completion_bonus_is_bounded(bonus):
+    with pytest.raises(PhysicalRewardProgramError, match=r"\[1, 10\]"):
+        validate_physical_reward_program(_program(completion_bonus=bonus))
+
+
+def test_scaled_completion_bonus_requires_bounded_temporal_emission(tmp_path):
+    with pytest.raises(PhysicalRewardProgramError, match="occupancy"):
+        validate_physical_reward_program(_program(completion_bonus=4.0))
+    with pytest.raises(PhysicalRewardProgramError, match="must not exceed 20"):
+        validate_physical_reward_program(
+            _program(
+                completion_bonus=8.0,
+                completion_reward_mode="capped_occupancy",
+                completion_reward_cap_steps=3,
+            )
+        )
+
+    path = tmp_path / "reward.json"
+    atomic_write_physical_reward_program(
+        path,
+        _program(completion_bonus=4.0, completion_reward_mode="first_onset"),
+    )
+    runtime = PhysicalPotentialRewardRuntime(
+        path, num_envs=1, expected_gamma=0.99, reload_interval_steps=16
+    )
+    runtime.reset([_obs(0.0)])
+    runtime.compute([_obs(0.95)], [9])
+    onset = runtime.compute([_obs(0.95)], [9])
+    assert onset.rewards.item() > 3.9
 
 
 def test_validator_rejects_unknown_completion_reward_mode():

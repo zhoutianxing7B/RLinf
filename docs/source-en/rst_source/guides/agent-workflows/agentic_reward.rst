@@ -6,6 +6,10 @@ physical reward program at evaluation boundaries. Luna does not run once per
 frame. Each candidate is evaluated on two fixed reset panels and is accepted or
 rolled back from the audit result.
 
+Luna may calibrate a bounded completion bonus from 1 to 10. Repeated occupancy
+stays fixed at 1, and a capped completion may emit at most 20 total reward, so
+reward scaling cannot silently recreate an unbounded occupancy return.
+
 Prepare the environment
 -----------------------
 

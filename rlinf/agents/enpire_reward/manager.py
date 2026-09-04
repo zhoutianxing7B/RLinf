@@ -204,7 +204,10 @@ class LunaRewardManager:
                 "rationale": "one concise causal hypothesis",
                 "task_ids": scene_context["task_ids"],
                 "gamma": expected_gamma,
-                "completion_bonus": "fixed number 1.0",
+                "completion_bonus": (
+                    "number in [1, 10]; occupancy requires 1; for "
+                    "capped_occupancy, bonus * cap_steps must be <= 20"
+                ),
                 "completion_hold_steps": "integer in [1, 32]",
                 "completion_reward_mode": (
                     "occupancy emits the bonus on every verified frame; "
@@ -323,6 +326,11 @@ class LunaRewardManager:
                     "task and scene; then diagnose verifier precision/recall, "
                     "stability, and SAC learnability from recent experiments. "
                     "Use TP/FP/FN and per-condition evidence for verifier changes. "
+                    "Estimate verifier precision as TP/(TP+FP) and recall as "
+                    "TP/(TP+FN). Change one causal axis per proposal whenever "
+                    "possible. If recall is already high and false positives are "
+                    "modest, keep the completion conditions fixed and calibrate "
+                    "only temporal emission or completion_bonus. "
                     "Treat past_reward_trials as causal memory: never return an "
                     "exact reward that was rolled back, and after a rollback change "
                     "a structural hypothesis instead of merely cycling old thresholds. "
@@ -341,7 +349,11 @@ class LunaRewardManager:
                     "critic loss stable but its Q contribution is dwarfed by the actor "
                     "objective and fixed-panel success does not improve, consider "
                     "capped_occupancy with a small K rather than returning to unbounded "
-                    "occupancy. Keep potential terms bounded and "
+                    "occupancy. If Q remains below one tenth of the actor SAC "
+                    "objective while critic loss is stable, increase the bounded "
+                    "completion_bonus by a meaningful factor. If Q or critic loss "
+                    "grows with policy regression, reduce it. Keep potential terms "
+                    "bounded and "
                     "stage-aligned. Independent simulator success may be used only "
                     "as audit evidence here and must never appear in the executable "
                     "program. Do not invent unavailable signals, code, hard "

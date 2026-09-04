@@ -5,6 +5,10 @@
 reward program。Luna 不会逐帧调用。每个候选 reward 都会在两个固定 reset
 panel 上评估，再根据审计结果接受或回滚。
 
+Luna 可以在 1 到 10 之间校准有界 completion bonus。重复 occupancy 的 bonus
+固定为 1，capped completion 的总奖励最多为 20，避免奖励缩放重新产生无界
+occupancy return。
+
 准备环境
 --------
 

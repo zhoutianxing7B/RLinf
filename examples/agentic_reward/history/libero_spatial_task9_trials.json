@@ -908,5 +908,807 @@
     },
     "source": "outputs/agentic_reward/enpire_task9_sac_event_v18/audit/state.json",
     "terminal_action": "rollback_regression"
+  },
+  {
+    "digest": "fa30441ccb007ec39c6c6d890c12c36436bb3ca5cc14c7eaa05f9a192847c8f6",
+    "evaluations": [
+      {
+        "action": "candidate_burn_in",
+        "physical_fn_once": 0.0,
+        "physical_fp_once": 0.07500000298023224,
+        "physical_tp_once": 0.42500001192092896,
+        "q_data": 0.11254779249429703,
+        "score": 0.4000000059604645,
+        "score_panel": {
+          "reset_panel_a": 0.4000000059604645,
+          "reset_panel_b": 0.4399999976158142
+        },
+        "step": 10
+      },
+      {
+        "action": "continue_candidate",
+        "physical_fn_once": 0.05000000074505806,
+        "physical_fp_once": 0.20000000298023224,
+        "physical_tp_once": 0.2750000059604645,
+        "q_data": 0.15369710326194763,
+        "score": 0.4000000059604645,
+        "score_panel": {
+          "reset_panel_a": 0.4399999976158142,
+          "reset_panel_b": 0.4000000059604645
+        },
+        "step": 15
+      },
+      {
+        "action": "rollback_regression",
+        "physical_fn_once": 0.0,
+        "physical_fp_once": 0.17499999701976776,
+        "physical_tp_once": 0.2750000059604645,
+        "q_data": 0.1963489055633545,
+        "score": 0.4000000059604645,
+        "score_panel": {
+          "reset_panel_a": 0.5400000214576721,
+          "reset_panel_b": 0.4000000059604645
+        },
+        "step": 20
+      }
+    ],
+    "program": {
+      "completion_bonus": 1.0,
+      "completion_conditions": [
+        {
+          "axes": [
+            0,
+            1
+          ],
+          "left": "akita_black_bowl_1_pos",
+          "op": "lt",
+          "right": "plate_1_pos",
+          "threshold": 0.07,
+          "type": "distance"
+        },
+        {
+          "index": 2,
+          "left": "akita_black_bowl_1_pos",
+          "op": "gt",
+          "right": "plate_1_pos",
+          "threshold": 0.008,
+          "type": "relative_scalar"
+        },
+        {
+          "axes": [
+            0,
+            1,
+            2
+          ],
+          "key": "akita_black_bowl_1_pos",
+          "op": "lt",
+          "threshold": 0.008,
+          "type": "delta_distance"
+        }
+      ],
+      "completion_hold_steps": 6,
+      "completion_reward_cap_steps": 3,
+      "completion_reward_mode": "capped_occupancy",
+      "gamma": 0.999,
+      "name": "task9_capped_settle_onset",
+      "potential_scale": 0.01,
+      "potential_terms": [
+        {
+          "axes": [
+            0,
+            1
+          ],
+          "left": "akita_black_bowl_1_pos",
+          "right": "plate_1_pos",
+          "scale": 0.12,
+          "type": "distance",
+          "weight": 0.5
+        },
+        {
+          "index": 2,
+          "key": "akita_black_bowl_1_pos",
+          "scale": 0.1,
+          "type": "height_delta",
+          "weight": 0.25
+        },
+        {
+          "axes": [
+            0,
+            1,
+            2
+          ],
+          "left": "robot0_eef_pos",
+          "right": "akita_black_bowl_1_pos",
+          "scale": 0.15,
+          "type": "distance",
+          "weight": 0.25
+        }
+      ],
+      "rationale": "The task requires approach, lift, XY transport, and stable placement verified by signed bowl-above-plate height, XY alignment, and low inter-frame displacement. Repeated occupancy rewards drove rising Q and critic instability; first_onset stabilized Q but its single reward contribution was too small for the actor and fixed-panel success did not improve. Retain the physically precise six-frame gate and tiny bounded shaping, but structurally allow only three verified completion rewards to improve learnability without returning to unbounded occupancy.",
+      "schema_version": 1,
+      "task_ids": [
+        9
+      ]
+    },
+    "terminal_action": "rollback_regression"
+  },
+  {
+    "digest": "47923f6ac3438cc7c7c073ece25104c03f7a20e539b2b03c6c06959d6835cb3a",
+    "evaluations": [
+      {
+        "action": "candidate_burn_in",
+        "physical_fn_once": 0.0,
+        "physical_fp_once": 0.20000000298023224,
+        "physical_tp_once": 0.32499998807907104,
+        "q_data": 0.14398124814033508,
+        "score": 0.41999998688697815,
+        "score_panel": {
+          "reset_panel_a": 0.41999998688697815,
+          "reset_panel_b": 0.5
+        },
+        "step": 25
+      },
+      {
+        "action": "continue_candidate",
+        "physical_fn_once": 0.02500000037252903,
+        "physical_fp_once": 0.125,
+        "physical_tp_once": 0.32499998807907104,
+        "q_data": 0.1878807544708252,
+        "score": 0.3799999952316284,
+        "score_panel": {
+          "reset_panel_a": 0.46000000834465027,
+          "reset_panel_b": 0.3799999952316284
+        },
+        "step": 30
+      },
+      {
+        "action": "rollback_regression",
+        "physical_fn_once": 0.0,
+        "physical_fp_once": 0.07500000298023224,
+        "physical_tp_once": 0.30000001192092896,
+        "q_data": 0.24603256583213806,
+        "score": 0.4000000059604645,
+        "score_panel": {
+          "reset_panel_a": 0.41999998688697815,
+          "reset_panel_b": 0.4000000059604645
+        },
+        "step": 35
+      }
+    ],
+    "program": {
+      "completion_bonus": 1.0,
+      "completion_conditions": [
+        {
+          "axes": [
+            0,
+            1
+          ],
+          "left": "akita_black_bowl_1_pos",
+          "op": "lt",
+          "right": "plate_1_pos",
+          "threshold": 0.07,
+          "type": "distance"
+        },
+        {
+          "index": 2,
+          "left": "akita_black_bowl_1_pos",
+          "op": "gt",
+          "right": "plate_1_pos",
+          "threshold": 0.008,
+          "type": "relative_scalar"
+        },
+        {
+          "axes": [
+            0,
+            1,
+            2
+          ],
+          "key": "akita_black_bowl_1_pos",
+          "op": "lt",
+          "threshold": 0.008,
+          "type": "delta_distance"
+        }
+      ],
+      "completion_hold_steps": 6,
+      "completion_reward_cap_steps": 4,
+      "completion_reward_mode": "capped_occupancy",
+      "gamma": 0.999,
+      "name": "task9_capped_settle_four",
+      "potential_scale": 0.01,
+      "potential_terms": [
+        {
+          "axes": [
+            0,
+            1
+          ],
+          "left": "akita_black_bowl_1_pos",
+          "right": "plate_1_pos",
+          "scale": 0.12,
+          "type": "distance",
+          "weight": 0.5
+        },
+        {
+          "index": 2,
+          "key": "akita_black_bowl_1_pos",
+          "scale": 0.1,
+          "type": "height_delta",
+          "weight": 0.25
+        },
+        {
+          "axes": [
+            0,
+            1,
+            2
+          ],
+          "left": "robot0_eef_pos",
+          "right": "akita_black_bowl_1_pos",
+          "scale": 0.15,
+          "type": "distance",
+          "weight": 0.25
+        }
+      ],
+      "rationale": "The signed-height, XY-alignment, and low-displacement six-frame verifier has good recall with moderate once-only FP, while later regressions reflect policy behavior. First-onset removed occupancy-driven Q inflation and kept critic values stable, but its single completion reward was too weak for the actor and did not improve fixed-panel success. Use a structurally distinct four-frame capped occupancy emission to provide limited completion credit without returning to unbounded occupancy, retaining only tiny bounded stage-aligned shaping.",
+      "schema_version": 1,
+      "task_ids": [
+        9
+      ]
+    },
+    "terminal_action": "rollback_regression"
+  },
+  {
+    "digest": "4c42d2cc7f501eab830c3d8397eb13940999d6a5fb001ebac1583f9ac16a632e",
+    "evaluations": [
+      {
+        "action": "candidate_burn_in",
+        "physical_fn_once": 0.0,
+        "physical_fp_once": 0.07500000298023224,
+        "physical_tp_once": 0.4000000059604645,
+        "q_data": 0.201745867729187,
+        "score": 0.46000000834465027,
+        "score_panel": {
+          "reset_panel_a": 0.5,
+          "reset_panel_b": 0.46000000834465027
+        },
+        "step": 40
+      },
+      {
+        "action": "continue_candidate",
+        "physical_fn_once": 0.0,
+        "physical_fp_once": 0.05000000074505806,
+        "physical_tp_once": 0.42500001192092896,
+        "q_data": 0.28332647681236267,
+        "score": 0.3400000035762787,
+        "score_panel": {
+          "reset_panel_a": 0.3799999952316284,
+          "reset_panel_b": 0.3400000035762787
+        },
+        "step": 45
+      },
+      {
+        "action": "continue_candidate",
+        "physical_fn_once": 0.0,
+        "physical_fp_once": 0.17499999701976776,
+        "physical_tp_once": 0.375,
+        "q_data": 0.38310009241104126,
+        "score": 0.46000000834465027,
+        "score_panel": {
+          "reset_panel_a": 0.5199999809265137,
+          "reset_panel_b": 0.46000000834465027
+        },
+        "step": 50
+      },
+      {
+        "action": "continue_candidate",
+        "physical_fn_once": 0.0,
+        "physical_fp_once": 0.10000000149011612,
+        "physical_tp_once": 0.375,
+        "q_data": 0.4462326765060425,
+        "score": 0.25999999046325684,
+        "score_panel": {
+          "reset_panel_a": 0.5,
+          "reset_panel_b": 0.25999999046325684
+        },
+        "step": 55
+      },
+      {
+        "action": "rollback_regression",
+        "physical_fn_once": 0.0,
+        "physical_fp_once": 0.15000000596046448,
+        "physical_tp_once": 0.30000001192092896,
+        "q_data": 0.5079771280288696,
+        "score": 0.41999998688697815,
+        "score_panel": {
+          "reset_panel_a": 0.5,
+          "reset_panel_b": 0.41999998688697815
+        },
+        "step": 60
+      }
+    ],
+    "program": {
+      "completion_bonus": 1.0,
+      "completion_conditions": [
+        {
+          "axes": [
+            0,
+            1
+          ],
+          "left": "akita_black_bowl_1_pos",
+          "op": "lt",
+          "right": "plate_1_pos",
+          "threshold": 0.07,
+          "type": "distance"
+        },
+        {
+          "index": 2,
+          "left": "akita_black_bowl_1_pos",
+          "op": "gt",
+          "right": "plate_1_pos",
+          "threshold": 0.008,
+          "type": "relative_scalar"
+        },
+        {
+          "axes": [
+            0,
+            1,
+            2
+          ],
+          "key": "akita_black_bowl_1_pos",
+          "op": "lt",
+          "threshold": 0.008,
+          "type": "delta_distance"
+        }
+      ],
+      "completion_hold_steps": 6,
+      "completion_reward_cap_steps": 6,
+      "completion_reward_mode": "capped_occupancy",
+      "gamma": 0.999,
+      "name": "task9_capped_settle_six_zero_potential",
+      "potential_scale": 0.0,
+      "potential_terms": [
+        {
+          "axes": [
+            0,
+            1
+          ],
+          "left": "akita_black_bowl_1_pos",
+          "right": "plate_1_pos",
+          "scale": 0.12,
+          "type": "distance",
+          "weight": 0.5
+        },
+        {
+          "index": 2,
+          "key": "akita_black_bowl_1_pos",
+          "scale": 0.1,
+          "type": "height_delta",
+          "weight": 0.25
+        },
+        {
+          "axes": [
+            0,
+            1,
+            2
+          ],
+          "left": "robot0_eef_pos",
+          "right": "akita_black_bowl_1_pos",
+          "scale": 0.15,
+          "type": "distance",
+          "weight": 0.25
+        }
+      ],
+      "rationale": "Retain the physically precise signed-height, XY-alignment, and low-displacement settle verifier, but remove potential shaping entirely and use a limited six-frame completion emission. Prior unbounded occupancy destabilized Q estimates, first_onset was too weak for the actor, and capped three- and four-frame variants regressed; this separates completion credit from shaping without returning to unbounded occupancy or treating post-success regressions as verifier error.",
+      "schema_version": 1,
+      "task_ids": [
+        9
+      ]
+    },
+    "terminal_action": "rollback_regression"
+  },
+  {
+    "digest": "15bdc461f9a411c3d1cfd0df0ce0fb7a99c7c5cef2ea561fb290a482e879dbe3",
+    "evaluations": [
+      {
+        "action": "candidate_burn_in",
+        "physical_fn_once": 0.0,
+        "physical_fp_once": 0.10000000149011612,
+        "physical_tp_once": 0.3499999940395355,
+        "q_data": 0.018268592655658722,
+        "score": 0.47999998927116394,
+        "score_panel": {
+          "reset_panel_a": 0.47999998927116394,
+          "reset_panel_b": 0.5600000023841858
+        },
+        "step": 65
+      },
+      {
+        "action": "continue_candidate",
+        "physical_fn_once": 0.0,
+        "physical_fp_once": 0.20000000298023224,
+        "physical_tp_once": 0.30000001192092896,
+        "q_data": 0.023147935047745705,
+        "score": 0.3799999952316284,
+        "score_panel": {
+          "reset_panel_a": 0.5199999809265137,
+          "reset_panel_b": 0.3799999952316284
+        },
+        "step": 70
+      },
+      {
+        "action": "continue_candidate",
+        "physical_fn_once": 0.0,
+        "physical_fp_once": 0.15000000596046448,
+        "physical_tp_once": 0.4000000059604645,
+        "q_data": 0.03053988516330719,
+        "score": 0.5,
+        "score_panel": {
+          "reset_panel_a": 0.5199999809265137,
+          "reset_panel_b": 0.5
+        },
+        "step": 75
+      },
+      {
+        "action": "continue_candidate",
+        "physical_fn_once": 0.02500000037252903,
+        "physical_fp_once": 0.10000000149011612,
+        "physical_tp_once": 0.375,
+        "q_data": 0.037317048758268356,
+        "score": 0.3199999928474426,
+        "score_panel": {
+          "reset_panel_a": 0.41999998688697815,
+          "reset_panel_b": 0.3199999928474426
+        },
+        "step": 80
+      },
+      {
+        "action": "rollback_regression",
+        "physical_fn_once": 0.0,
+        "physical_fp_once": 0.22499999403953552,
+        "physical_tp_once": 0.32499998807907104,
+        "q_data": 0.044290266931056976,
+        "score": 0.41999998688697815,
+        "score_panel": {
+          "reset_panel_a": 0.41999998688697815,
+          "reset_panel_b": 0.41999998688697815
+        },
+        "step": 85
+      }
+    ],
+    "program": {
+      "completion_bonus": 1.0,
+      "completion_conditions": [
+        {
+          "axes": [
+            0,
+            1
+          ],
+          "left": "akita_black_bowl_1_pos",
+          "op": "lt",
+          "right": "plate_1_pos",
+          "threshold": 0.072,
+          "type": "distance"
+        },
+        {
+          "index": 2,
+          "left": "akita_black_bowl_1_pos",
+          "op": "gt",
+          "right": "plate_1_pos",
+          "threshold": 0.008,
+          "type": "relative_scalar"
+        },
+        {
+          "axes": [
+            0,
+            1,
+            2
+          ],
+          "key": "akita_black_bowl_1_pos",
+          "op": "lt",
+          "threshold": 0.008,
+          "type": "delta_distance"
+        }
+      ],
+      "completion_hold_steps": 6,
+      "completion_reward_mode": "first_onset",
+      "gamma": 0.999,
+      "name": "task9_onset_zero_shaping_xy",
+      "potential_scale": 0.0,
+      "potential_terms": [
+        {
+          "axes": [
+            0,
+            1
+          ],
+          "left": "akita_black_bowl_1_pos",
+          "right": "plate_1_pos",
+          "scale": 0.12,
+          "type": "distance",
+          "weight": 0.5
+        },
+        {
+          "index": 2,
+          "key": "akita_black_bowl_1_pos",
+          "scale": 0.1,
+          "type": "height_delta",
+          "weight": 0.25
+        },
+        {
+          "axes": [
+            0,
+            1,
+            2
+          ],
+          "left": "robot0_eef_pos",
+          "right": "akita_black_bowl_1_pos",
+          "scale": 0.15,
+          "type": "distance",
+          "weight": 0.25
+        }
+      ],
+      "rationale": "The bowl placement stages are approach, lift, XY transport, and stable placement. TP once remains moderate while XY is the weakest gate and low displacement is nearly always satisfied; post-success regressions indicate policy behavior rather than verifier error. Occupancy and capped-occupancy variants repeatedly drove rising Q and critic loss, while capped rewards still regressed, so use a fresh first-onset temporal structure with zero potential shaping and retain signed relative height, XY alignment, and six-frame low-motion confirmation to isolate completion credit from SAC instability.",
+      "schema_version": 1,
+      "task_ids": [
+        9
+      ]
+    },
+    "terminal_action": "rollback_regression"
+  },
+  {
+    "digest": "a96ec3f6103c8178c3079bedd02a3dc39031874695de64bdd8f8deda3a694cc6",
+    "evaluations": [
+      {
+        "action": "candidate_burn_in",
+        "physical_fn_once": 0.0,
+        "physical_fp_once": 0.07500000298023224,
+        "physical_tp_once": 0.44999998807907104,
+        "q_data": 0.15320080518722534,
+        "score": 0.41999998688697815,
+        "score_panel": {
+          "reset_panel_a": 0.5199999809265137,
+          "reset_panel_b": 0.41999998688697815
+        },
+        "step": 90
+      },
+      {
+        "action": "continue_candidate",
+        "physical_fn_once": 0.02500000037252903,
+        "physical_fp_once": 0.20000000298023224,
+        "physical_tp_once": 0.3499999940395355,
+        "q_data": 0.23425441980361938,
+        "score": 0.3400000035762787,
+        "score_panel": {
+          "reset_panel_a": 0.3400000035762787,
+          "reset_panel_b": 0.46000000834465027
+        },
+        "step": 95
+      },
+      {
+        "action": "rollback_regression",
+        "physical_fn_once": 0.0,
+        "physical_fp_once": 0.25,
+        "physical_tp_once": 0.375,
+        "q_data": 0.30687111616134644,
+        "score": 0.3400000035762787,
+        "score_panel": {
+          "reset_panel_a": 0.3400000035762787,
+          "reset_panel_b": 0.36000001430511475
+        },
+        "step": 100
+      }
+    ],
+    "program": {
+      "completion_bonus": 1.0,
+      "completion_conditions": [
+        {
+          "axes": [
+            0,
+            1
+          ],
+          "left": "akita_black_bowl_1_pos",
+          "op": "lt",
+          "right": "plate_1_pos",
+          "threshold": 0.072,
+          "type": "distance"
+        },
+        {
+          "index": 2,
+          "left": "akita_black_bowl_1_pos",
+          "op": "gt",
+          "right": "plate_1_pos",
+          "threshold": 0.008,
+          "type": "relative_scalar"
+        },
+        {
+          "axes": [
+            0,
+            1,
+            2
+          ],
+          "key": "akita_black_bowl_1_pos",
+          "op": "lt",
+          "threshold": 0.008,
+          "type": "delta_distance"
+        }
+      ],
+      "completion_hold_steps": 5,
+      "completion_reward_cap_steps": 5,
+      "completion_reward_mode": "capped_occupancy",
+      "gamma": 0.999,
+      "name": "task9_capped_temporal_settle5",
+      "potential_scale": 0.0,
+      "potential_terms": [
+        {
+          "axes": [
+            0,
+            1
+          ],
+          "left": "akita_black_bowl_1_pos",
+          "right": "plate_1_pos",
+          "scale": 0.12,
+          "type": "distance",
+          "weight": 0.5
+        },
+        {
+          "index": 2,
+          "key": "akita_black_bowl_1_pos",
+          "scale": 0.1,
+          "type": "height_delta",
+          "weight": 0.25
+        },
+        {
+          "axes": [
+            0,
+            1,
+            2
+          ],
+          "left": "robot0_eef_pos",
+          "right": "akita_black_bowl_1_pos",
+          "scale": 0.15,
+          "type": "distance",
+          "weight": 0.25
+        }
+      ],
+      "rationale": "Retain signed relative height, XY alignment, and low bowl displacement because XY is the weak gate while displacement is consistently satisfied; use a fresh five-frame hold with capped five-frame completion credit and zero potential shaping to provide more actor-visible signal than first-onset while avoiding the unbounded occupancy Q inflation and keeping temporal credit limited.",
+      "schema_version": 1,
+      "task_ids": [
+        9
+      ]
+    },
+    "terminal_action": "rollback_regression"
+  },
+  {
+    "digest": "3f139c94c263592055efca53b6f8fce1402a2828a08112dc496016527decd607",
+    "evaluations": [
+      {
+        "action": "candidate_burn_in",
+        "physical_fn_once": 0.0,
+        "physical_fp_once": 0.17499999701976776,
+        "physical_tp_once": 0.42500001192092896,
+        "q_data": 0.07067804783582687,
+        "score": 0.4399999976158142,
+        "score_panel": {
+          "reset_panel_a": 0.4399999976158142,
+          "reset_panel_b": 0.5
+        },
+        "step": 105
+      },
+      {
+        "action": "continue_candidate",
+        "physical_fn_once": 0.0,
+        "physical_fp_once": 0.07500000298023224,
+        "physical_tp_once": 0.4000000059604645,
+        "q_data": 0.09818565845489502,
+        "score": 0.36000001430511475,
+        "score_panel": {
+          "reset_panel_a": 0.4399999976158142,
+          "reset_panel_b": 0.36000001430511475
+        },
+        "step": 110
+      },
+      {
+        "action": "continue_candidate",
+        "physical_fn_once": 0.0,
+        "physical_fp_once": 0.22499999403953552,
+        "physical_tp_once": 0.30000001192092896,
+        "q_data": 0.12058646976947784,
+        "score": 0.4399999976158142,
+        "score_panel": {
+          "reset_panel_a": 0.47999998927116394,
+          "reset_panel_b": 0.4399999976158142
+        },
+        "step": 115
+      },
+      {
+        "action": "continue_candidate",
+        "physical_fn_once": 0.0,
+        "physical_fp_once": 0.25,
+        "physical_tp_once": 0.25,
+        "q_data": 0.13488151133060455,
+        "score": 0.3400000035762787,
+        "score_panel": {
+          "reset_panel_a": 0.41999998688697815,
+          "reset_panel_b": 0.3400000035762787
+        },
+        "step": 120
+      }
+    ],
+    "program": {
+      "completion_bonus": 1.0,
+      "completion_conditions": [
+        {
+          "axes": [
+            0,
+            1
+          ],
+          "left": "akita_black_bowl_1_pos",
+          "op": "lt",
+          "right": "plate_1_pos",
+          "threshold": 0.07,
+          "type": "distance"
+        },
+        {
+          "index": 2,
+          "left": "akita_black_bowl_1_pos",
+          "op": "gt",
+          "right": "plate_1_pos",
+          "threshold": 0.008,
+          "type": "relative_scalar"
+        },
+        {
+          "axes": [
+            0,
+            1,
+            2
+          ],
+          "key": "akita_black_bowl_1_pos",
+          "op": "lt",
+          "threshold": 0.008,
+          "type": "delta_distance"
+        }
+      ],
+      "completion_hold_steps": 6,
+      "completion_reward_cap_steps": 2,
+      "completion_reward_mode": "capped_occupancy",
+      "gamma": 0.999,
+      "name": "task9_capped_settle_two",
+      "potential_scale": 0.0,
+      "potential_terms": [
+        {
+          "axes": [
+            0,
+            1
+          ],
+          "left": "akita_black_bowl_1_pos",
+          "right": "plate_1_pos",
+          "scale": 0.12,
+          "type": "distance",
+          "weight": 0.5
+        },
+        {
+          "index": 2,
+          "key": "akita_black_bowl_1_pos",
+          "scale": 0.1,
+          "type": "height_delta",
+          "weight": 0.25
+        },
+        {
+          "axes": [
+            0,
+            1,
+            2
+          ],
+          "left": "robot0_eef_pos",
+          "right": "akita_black_bowl_1_pos",
+          "scale": 0.15,
+          "type": "distance",
+          "weight": 0.25
+        }
+      ],
+      "rationale": "The task stages are approach, lift, XY transport, and stable placement. TP once remains moderate, XY alignment is the weak gate, and low displacement is nearly always satisfied; post-success regressions reflect policy behavior rather than verifier error. Occupancy and larger capped variants produced reward-driven Q and critic growth, while first_onset and capped variants with more emission did not improve fixed-panel success. Keep the signed-height, XY-alignment, and six-frame low-motion verifier, retain zero shaping, and use a new two-frame capped completion emission to provide limited actor-visible credit without unbounded temporal accumulation.",
+      "schema_version": 1,
+      "task_ids": [
+        9
+      ]
+    },
+    "terminal_action": "interrupted_no_stable_gain"
   }
 ]

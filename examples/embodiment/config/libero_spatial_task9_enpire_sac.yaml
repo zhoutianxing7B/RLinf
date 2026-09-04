@@ -54,13 +54,13 @@ algorithm:
   critic_actor_ratio: 16
   critic_update_shared_encoder: false
   actor_trainable_modules: [actor_mean, actor_logstd]
-  actor_behavior_coefficient: 300.0
+  actor_behavior_coefficient: 100.0
   bootstrap_type: standard
   gamma: 0.999
   tau: 0.005
   entropy_tuning:
     alpha_type: softplus
-    initial_alpha: 0.1
+    initial_alpha: 0.01
     target_entropy: -56
     optim:
       lr: 3.0e-4
