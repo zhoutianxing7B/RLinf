@@ -49,7 +49,7 @@ algorithm:
   actor_agg_q: mean
   backup_entropy: false
   critic_subsample_size: 0
-  critic_actor_ratio: 1
+  critic_actor_ratio: 4
   bootstrap_type: standard
   gamma: 0.999
   tau: 0.005
@@ -69,7 +69,7 @@ algorithm:
     auto_save: false
   target_update_freq: 1
   target_update_type: all
-  train_actor_steps: 1
+  train_actor_steps: 6
   filter_rewards: false
 
 env:
@@ -163,7 +163,7 @@ actor:
     warmup_checkpoint: "${oc.env:ENPIRE_WARMUP_CHECKPOINT,''}"
     warmup_action_std: 0.05
   optim:
-    lr: 1.0e-4
+    lr: 1.0e-5
     adam_beta1: 0.9
     adam_beta2: 0.96
     adam_eps: 1.0e-08
