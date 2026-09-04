@@ -160,6 +160,7 @@ actor:
     add_value_head: false
     add_q_head: true
     q_head_type: default
+    warmup_checkpoint: "${oc.env:ENPIRE_WARMUP_CHECKPOINT,''}"
   optim:
     lr: 1.0e-4
     adam_beta1: 0.9

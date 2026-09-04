@@ -49,6 +49,28 @@ from rlinf.workers.actor.embodied_fsdp_actor_worker import EmbodiedFSDPActor
 
 
 class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
+    def model_provider_func(self):
+        """Build SAC model and optionally initialize actor weights from SFT."""
+        model = super().model_provider_func()
+        warmup_path = self.cfg.actor.model.get("warmup_checkpoint", "")
+        if not warmup_path:
+            return model
+        warmup_path = os.path.expanduser(str(warmup_path))
+        if os.path.isdir(warmup_path):
+            warmup_path = os.path.join(warmup_path, "model.pt")
+        if not os.path.isfile(warmup_path):
+            raise FileNotFoundError(f"Actor warmup checkpoint not found: {warmup_path}")
+        state = torch.load(warmup_path, map_location="cpu", weights_only=True)
+        incompatible = model.load_state_dict(state, strict=False)
+        missing = [name for name in incompatible.missing_keys if "q_head" not in name]
+        if missing or incompatible.unexpected_keys:
+            raise ValueError(
+                "Actor warmup checkpoint is incompatible: "
+                f"missing={missing}, unexpected={incompatible.unexpected_keys}"
+            )
+        self.logger.info("Initialized actor parameters from %s.", warmup_path)
+        return model
+
     def __init__(self, cfg: DictConfig):
         super().__init__(cfg)
 
