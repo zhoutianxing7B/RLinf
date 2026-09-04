@@ -13,6 +13,7 @@
 # limitations under the License.
 
 
+import math
 import os
 from typing import Optional
 
@@ -69,6 +70,22 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
                 f"missing={missing}, unexpected={incompatible.unexpected_keys}"
             )
         self.logger.info("Initialized actor parameters from %s.", warmup_path)
+        warmup_action_std = float(
+            self.cfg.actor.model.get("warmup_action_std", 0.0)
+        )
+        if warmup_action_std:
+            if not 1.0e-5 <= warmup_action_std <= 1.0:
+                raise ValueError("warmup_action_std must be in [1e-5, 1].")
+            log_std = math.log(warmup_action_std)
+            if not isinstance(model.actor_logstd, torch.nn.Linear):
+                raise TypeError("SAC warmup expects a state-dependent variance head.")
+            with torch.no_grad():
+                model.actor_logstd.weight.zero_()
+                model.actor_logstd.bias.fill_(log_std)
+            self.logger.info(
+                "Initialized SAC exploration standard deviation to %.5f.",
+                warmup_action_std,
+            )
         return model
 
     def __init__(self, cfg: DictConfig):
