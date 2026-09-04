@@ -772,5 +772,141 @@
     },
     "source": "v17 stable-SAC 100-episode fixed panels",
     "terminal_action": "rollback_regression"
+  },
+  {
+    "digest": "b30349ef0daa668c7f635cbc434599f6cead305f0b0d6996ed70847a98662a6c",
+    "evaluations": [
+      {
+        "action": "candidate_burn_in",
+        "physical_fn_once": 0.05000000074505806,
+        "physical_fp_once": 0.15000000596046448,
+        "physical_tp_once": 0.32499998807907104,
+        "q_data": -0.15539446473121643,
+        "score": 0.4399999976158142,
+        "score_panel": {
+          "reset_panel_a": 0.5,
+          "reset_panel_b": 0.4399999976158142
+        },
+        "step": 10
+      },
+      {
+        "action": "continue_candidate",
+        "physical_fn_once": 0.0,
+        "physical_fp_once": 0.20000000298023224,
+        "physical_tp_once": 0.3499999940395355,
+        "q_data": -0.1473524570465088,
+        "score": 0.4000000059604645,
+        "score_panel": {
+          "reset_panel_a": 0.4000000059604645,
+          "reset_panel_b": 0.46000000834465027
+        },
+        "step": 15
+      },
+      {
+        "action": "continue_candidate",
+        "physical_fn_once": 0.0,
+        "physical_fp_once": 0.05000000074505806,
+        "physical_tp_once": 0.3499999940395355,
+        "q_data": -0.14315000176429749,
+        "score": 0.36000001430511475,
+        "score_panel": {
+          "reset_panel_a": 0.46000000834465027,
+          "reset_panel_b": 0.36000001430511475
+        },
+        "step": 20
+      },
+      {
+        "action": "rollback_regression",
+        "physical_fn_once": 0.0,
+        "physical_fp_once": 0.15000000596046448,
+        "physical_tp_once": 0.4000000059604645,
+        "q_data": -0.13288503885269165,
+        "score": 0.36000001430511475,
+        "score_panel": {
+          "reset_panel_a": 0.41999998688697815,
+          "reset_panel_b": 0.36000001430511475
+        },
+        "step": 25
+      }
+    ],
+    "program": {
+      "completion_bonus": 1.0,
+      "completion_conditions": [
+        {
+          "axes": [
+            0,
+            1
+          ],
+          "left": "akita_black_bowl_1_pos",
+          "op": "lt",
+          "right": "plate_1_pos",
+          "threshold": 0.07,
+          "type": "distance"
+        },
+        {
+          "index": 2,
+          "left": "akita_black_bowl_1_pos",
+          "op": "gt",
+          "right": "plate_1_pos",
+          "threshold": 0.008,
+          "type": "relative_scalar"
+        },
+        {
+          "axes": [
+            0,
+            1,
+            2
+          ],
+          "key": "akita_black_bowl_1_pos",
+          "op": "lt",
+          "threshold": 0.008,
+          "type": "delta_distance"
+        }
+      ],
+      "completion_hold_steps": 6,
+      "completion_reward_mode": "first_onset",
+      "gamma": 0.999,
+      "name": "task9_first_onset_settle",
+      "potential_scale": 0.01,
+      "potential_terms": [
+        {
+          "axes": [
+            0,
+            1
+          ],
+          "left": "akita_black_bowl_1_pos",
+          "right": "plate_1_pos",
+          "scale": 0.12,
+          "type": "distance",
+          "weight": 0.5
+        },
+        {
+          "index": 2,
+          "key": "akita_black_bowl_1_pos",
+          "scale": 0.1,
+          "type": "height_delta",
+          "weight": 0.25
+        },
+        {
+          "axes": [
+            0,
+            1,
+            2
+          ],
+          "left": "robot0_eef_pos",
+          "right": "akita_black_bowl_1_pos",
+          "scale": 0.15,
+          "type": "distance",
+          "weight": 0.25
+        }
+      ],
+      "rationale": "Use signed bowl-above-plate height, XY alignment, and low inter-frame displacement for six-frame physical stabilization. Repeated occupancy variants showed acceptable once-only TP/FP but rising Q and critic loss followed by policy regressions; change the temporal reward structure with first-onset emission and only very small bounded stage-aligned shaping rather than retuning gates or mistaking regressions for verifier error.",
+      "schema_version": 1,
+      "task_ids": [
+        9
+      ]
+    },
+    "source": "outputs/agentic_reward/enpire_task9_sac_event_v18/audit/state.json",
+    "terminal_action": "rollback_regression"
   }
 ]

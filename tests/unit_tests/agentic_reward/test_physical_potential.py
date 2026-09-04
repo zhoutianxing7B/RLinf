@@ -198,6 +198,32 @@ def test_first_onset_completion_reward_is_capped_per_episode(tmp_path):
     assert next_episode_onset.completion_reward.tolist() == [1.0]
 
 
+def test_capped_occupancy_limits_reward_but_not_verifier(tmp_path):
+    path = tmp_path / "reward.json"
+    atomic_write_physical_reward_program(
+        path,
+        _program(
+            completion_reward_mode="capped_occupancy",
+            completion_reward_cap_steps=3,
+        ),
+    )
+    runtime = PhysicalPotentialRewardRuntime(
+        path, num_envs=1, expected_gamma=0.99, reload_interval_steps=16
+    )
+    incomplete = _obs(0.0)
+    complete = _obs(0.95)
+    runtime.reset([incomplete])
+
+    steps = [runtime.compute([complete], [9]) for _ in range(6)]
+
+    assert [step.completion_reward.item() for step in steps] == [0, 1, 1, 1, 0, 0]
+    assert [step.completion.item() for step in steps] == [0, 1, 1, 1, 1, 1]
+
+    runtime.reset([incomplete])
+    next_episode = [runtime.compute([complete], [9]) for _ in range(2)]
+    assert next_episode[-1].completion_reward.tolist() == [1.0]
+
+
 def test_hot_reload_suppresses_artificial_potential_impulse(tmp_path):
     path = tmp_path / "reward.json"
     atomic_write_physical_reward_program(path, _program())
@@ -533,6 +559,17 @@ def test_validator_rejects_unknown_completion_reward_mode():
     with pytest.raises(PhysicalRewardProgramError, match="completion_reward_mode"):
         validate_physical_reward_program(
             _program(completion_reward_mode="repeat_onset")
+        )
+
+
+@pytest.mark.parametrize("cap_steps", [None, 1, 33, 2.5])
+def test_validator_bounds_capped_occupancy_steps(cap_steps):
+    with pytest.raises(PhysicalRewardProgramError, match="cap_steps"):
+        validate_physical_reward_program(
+            _program(
+                completion_reward_mode="capped_occupancy",
+                completion_reward_cap_steps=cap_steps,
+            )
         )
 
 

@@ -39,7 +39,9 @@ _SUPPORTED_CONDITION_TYPES = frozenset(
     {"delta_distance", "distance", "relative_scalar", "scalar"}
 )
 _SUPPORTED_OPERATORS = frozenset({"gt", "lt"})
-_SUPPORTED_COMPLETION_REWARD_MODES = frozenset({"first_onset", "occupancy"})
+_SUPPORTED_COMPLETION_REWARD_MODES = frozenset(
+    {"capped_occupancy", "first_onset", "occupancy"}
+)
 _MAX_COMPONENTS = 8
 
 
@@ -146,8 +148,27 @@ def validate_physical_reward_program(
     completion_reward_mode = str(program.get("completion_reward_mode", "occupancy"))
     if completion_reward_mode not in _SUPPORTED_COMPLETION_REWARD_MODES:
         raise PhysicalRewardProgramError(
-            "completion_reward_mode must be 'occupancy' or 'first_onset'."
+            "completion_reward_mode must be 'occupancy', 'first_onset', or "
+            "'capped_occupancy'."
         )
+    completion_reward_cap_steps = None
+    if completion_reward_mode == "capped_occupancy":
+        raw_cap_steps = program.get("completion_reward_cap_steps")
+        try:
+            completion_reward_cap_steps = int(raw_cap_steps)
+        except (TypeError, ValueError) as error:
+            raise PhysicalRewardProgramError(
+                "completion_reward_cap_steps must be an integer in [2, 32] "
+                "for capped_occupancy."
+            ) from error
+        if (
+            isinstance(raw_cap_steps, float)
+            and raw_cap_steps != completion_reward_cap_steps
+        ) or not 2 <= completion_reward_cap_steps <= 32:
+            raise PhysicalRewardProgramError(
+                "completion_reward_cap_steps must be an integer in [2, 32] "
+                "for capped_occupancy."
+            )
     potential_scale = _finite_float(
         program.get("potential_scale", 0.1), "potential_scale"
     )
@@ -279,7 +300,7 @@ def validate_physical_reward_program(
     if any(task_id < 0 for task_id in task_ids):
         raise PhysicalRewardProgramError("task_ids cannot contain negative values.")
 
-    return {
+    normalized_program = {
         "schema_version": 1,
         "name": name.strip(),
         "rationale": str(program.get("rationale", "")).strip(),
@@ -292,6 +313,9 @@ def validate_physical_reward_program(
         "potential_scale": potential_scale,
         "potential_terms": normalized_terms,
     }
+    if completion_reward_cap_steps is not None:
+        normalized_program["completion_reward_cap_steps"] = completion_reward_cap_steps
+    return normalized_program
 
 
 def physical_program_digest(program: Mapping[str, Any]) -> str:
@@ -354,6 +378,7 @@ class PhysicalPotentialRewardRuntime:
         self._previous_potential = np.zeros(num_envs, dtype=np.float64)
         self._hold = np.zeros(num_envs, dtype=np.int32)
         self._completion_seen = np.zeros(num_envs, dtype=bool)
+        self._completion_reward_count = np.zeros(num_envs, dtype=np.int32)
         self._reload(force=True)
 
     def _reload(self, *, force: bool = False) -> bool:
@@ -413,6 +438,7 @@ class PhysicalPotentialRewardRuntime:
             }
             self._hold[env_index] = 0
             self._completion_seen[env_index] = False
+            self._completion_reward_count[env_index] = 0
             self._previous_potential[env_index] = self._potential(
                 observation, env_index
             )
@@ -550,8 +576,17 @@ class PhysicalPotentialRewardRuntime:
             completion[env_index] = float(
                 self._hold[env_index] >= self.program["completion_hold_steps"]
             )
-            if self.program["completion_reward_mode"] == "occupancy":
+            completion_reward_mode = self.program["completion_reward_mode"]
+            if completion_reward_mode == "occupancy":
                 completion_reward[env_index] = completion[env_index]
+            elif completion_reward_mode == "capped_occupancy":
+                cap_steps = self.program["completion_reward_cap_steps"]
+                if (
+                    completion[env_index]
+                    and self._completion_reward_count[env_index] < cap_steps
+                ):
+                    completion_reward[env_index] = 1.0
+                    self._completion_reward_count[env_index] += 1
             elif completion[env_index] and not self._completion_seen[env_index]:
                 completion_reward[env_index] = 1.0
                 self._completion_seen[env_index] = True

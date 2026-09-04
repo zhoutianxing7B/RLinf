@@ -208,7 +208,11 @@ class LunaRewardManager:
                 "completion_hold_steps": "integer in [1, 32]",
                 "completion_reward_mode": (
                     "occupancy emits the bonus on every verified frame; "
-                    "first_onset emits it only once per episode"
+                    "first_onset emits it only once per episode; capped_occupancy "
+                    "emits on verified frames up to completion_reward_cap_steps"
+                ),
+                "completion_reward_cap_steps": (
+                    "required integer in [2, 32] only for capped_occupancy"
                 ),
                 "completion_conditions": [
                     {
@@ -285,7 +289,8 @@ class LunaRewardManager:
                 ),
                 "physical_completion_reward_return": (
                     "completion bonuses actually emitted to SAC; first_onset caps "
-                    "this at one per episode while occupancy can grow with horizon"
+                    "this at one per episode, capped_occupancy caps it at the chosen "
+                    "K, while occupancy can grow with horizon"
                 ),
             },
             "forbidden_inputs": [
@@ -332,7 +337,11 @@ class LunaRewardManager:
                     "show rising Q scale or critic loss followed by policy regression, "
                     "make a structural temporal change: consider first_onset completion "
                     "and zero or very small potential shaping instead of another small "
-                    "threshold or weight adjustment. Keep potential terms bounded and "
+                    "threshold or weight adjustment. If first_onset then keeps Q and "
+                    "critic loss stable but its Q contribution is dwarfed by the actor "
+                    "objective and fixed-panel success does not improve, consider "
+                    "capped_occupancy with a small K rather than returning to unbounded "
+                    "occupancy. Keep potential terms bounded and "
                     "stage-aligned. Independent simulator success may be used only "
                     "as audit evidence here and must never appear in the executable "
                     "program. Do not invent unavailable signals, code, hard "
