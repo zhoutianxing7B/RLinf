@@ -333,3 +333,92 @@ def test_controller_accepts_stable_gain_then_consolidates(tmp_path, monkeypatch)
         step=25, metrics=improved, checkpoint_path=tmp_path / "step25"
     )
     assert fifth.action == "champion_plateau"
+
+
+def test_relative_height_and_motion_stability_conditions(tmp_path):
+    program = _program(
+        completion_hold_steps=2,
+        completion_conditions=[
+            {
+                "type": "distance",
+                "left": "object_pos",
+                "right": "target_pos",
+                "axes": [0, 1],
+                "op": "lt",
+                "threshold": 0.1,
+            },
+            {
+                "type": "relative_scalar",
+                "left": "object_pos",
+                "right": "target_pos",
+                "index": 2,
+                "op": "gt",
+                "threshold": 0.0,
+            },
+            {
+                "type": "relative_scalar",
+                "left": "object_pos",
+                "right": "target_pos",
+                "index": 2,
+                "op": "lt",
+                "threshold": 0.1,
+            },
+            {
+                "type": "delta_distance",
+                "key": "object_pos",
+                "axes": [0, 1, 2],
+                "op": "lt",
+                "threshold": 0.01,
+            },
+        ],
+        potential_terms=[
+            {
+                "type": "relative_scalar",
+                "left": "object_pos",
+                "right": "target_pos",
+                "index": 2,
+                "target": 0.05,
+                "scale": 0.02,
+                "weight": 1.0,
+            }
+        ],
+    )
+    path = tmp_path / "reward.json"
+    atomic_write_physical_reward_program(path, program)
+    runtime = PhysicalPotentialRewardRuntime(
+        path, num_envs=1, expected_gamma=0.99, reload_interval_steps=16
+    )
+    target = np.asarray([0.0, 0.0, 1.0])
+    stable = {
+        "object_pos": np.asarray([0.0, 0.0, 1.05]),
+        "target_pos": target,
+    }
+    runtime.reset([stable])
+
+    first = runtime.compute([stable], [9])
+    second = runtime.compute([stable], [9])
+    assert first.raw_completion.tolist() == [1.0]
+    assert first.completion.tolist() == [0.0]
+    assert second.completion.tolist() == [1.0]
+    assert second.condition_pass.tolist() == [[1.0, 1.0, 1.0, 1.0]]
+    assert second.term_scores[0, 0] == pytest.approx(1.0)
+
+    moved = {
+        "object_pos": np.asarray([0.02, 0.0, 1.05]),
+        "target_pos": target,
+    }
+    unstable = runtime.compute([moved], [9])
+    assert unstable.raw_completion.tolist() == [0.0]
+    assert unstable.condition_pass[0, 3] == 0.0
+    assert unstable.completion.tolist() == [0.0]
+
+
+def test_validator_bounds_audit_component_count():
+    conditions = _program()["completion_conditions"] * 9
+    with pytest.raises(PhysicalRewardProgramError, match="cannot exceed"):
+        validate_physical_reward_program(_program(completion_conditions=conditions))
+
+
+def test_completion_bonus_is_fixed_for_comparable_elite_threshold():
+    with pytest.raises(PhysicalRewardProgramError, match="must equal 1.0"):
+        validate_physical_reward_program(_program(completion_bonus=2.0))

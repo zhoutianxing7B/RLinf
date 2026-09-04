@@ -70,6 +70,16 @@ algorithm:
     sample_window_size: 20
     min_buffer_size: 1
     auto_save: false
+  # Self-bootstrap complete agent rollouts only. Actions remain replay labels;
+  # neither demonstrations nor simulator success are ever used as reward.
+  demo_buffer:
+    enable_cache: true
+    cache_size: 100
+    sample_window_size: 100
+    min_buffer_size: 0
+    promote_reward_threshold: 0.5
+    clear_on_reward_revision: true
+    auto_save: false
   target_update_freq: 1
   target_update_type: all
   train_actor_steps: 6

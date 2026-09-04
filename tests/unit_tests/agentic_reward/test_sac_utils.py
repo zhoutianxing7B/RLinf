@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import pytest
 import torch
 
 from rlinf.algorithms.sac_utils import (
     behavior_regularized_actor_loss,
     discounted_chunk_rewards,
+    extract_reward_elite_trajectory,
 )
+from rlinf.data.schema.embodied_types import Trajectory
 
 
 def test_discounted_chunk_rewards_matches_manual_sum():
@@ -36,3 +39,36 @@ def test_behavior_regularization_anchors_policy_actions():
     torch.testing.assert_close(behavior, torch.tensor(1.0))
     torch.testing.assert_close(total, torch.tensor(5.0))
     total.backward()
+
+
+def test_reward_elite_replay_keeps_full_selected_environment_trajectory():
+    rewards = torch.zeros(4, 3, 2)
+    rewards[2, 1, 0] = 0.8
+    trajectory = Trajectory(
+        max_episode_length=4,
+        model_weights_id="step-7",
+        rewards=rewards,
+        actions=torch.arange(4 * 3 * 2).reshape(4, 3, 2),
+        terminations=torch.zeros(4, 3, dtype=torch.bool),
+        curr_obs={"states": torch.arange(4 * 3 * 5).reshape(4, 3, 5)},
+        next_obs={"states": torch.ones(4, 3, 5)},
+    )
+
+    elite = extract_reward_elite_trajectory(trajectory, reward_threshold=0.5)
+
+    assert elite is not None
+    assert elite.rewards.shape == (4, 1, 2)
+    torch.testing.assert_close(elite.rewards[:, 0], trajectory.rewards[:, 1])
+    torch.testing.assert_close(elite.actions[:, 0], trajectory.actions[:, 1])
+    torch.testing.assert_close(
+        elite.curr_obs["states"][:, 0], trajectory.curr_obs["states"][:, 1]
+    )
+    assert elite.max_episode_length == 4
+    assert elite.model_weights_id == "step-7"
+
+
+def test_reward_elite_replay_rejects_no_completion_and_invalid_threshold():
+    trajectory = Trajectory(rewards=torch.full((3, 2, 1), 0.25))
+    assert extract_reward_elite_trajectory(trajectory, reward_threshold=0.5) is None
+    with pytest.raises(ValueError):
+        extract_reward_elite_trajectory(trajectory, reward_threshold=1.0)

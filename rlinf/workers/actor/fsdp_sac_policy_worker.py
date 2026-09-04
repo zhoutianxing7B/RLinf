@@ -26,6 +26,7 @@ from torch.utils.data import DataLoader
 from rlinf.algorithms.sac_utils import (
     behavior_regularized_actor_loss,
     discounted_chunk_rewards,
+    extract_reward_elite_trajectory,
 )
 from rlinf.config import SupportedModel
 from rlinf.data.schema.embodied_types import Trajectory
@@ -386,6 +387,13 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
     def clear_replay_buffer(self) -> dict[str, float]:
         """Drop transitions labeled by an obsolete reward revision."""
         self.replay_buffer.clear()
+        demo_cfg = self.cfg.algorithm.get("demo_buffer", None)
+        if (
+            self.demo_buffer is not None
+            and demo_cfg is not None
+            and demo_cfg.get("clear_on_reward_revision", False)
+        ):
+            self.demo_buffer.clear()
         return self.replay_buffer.get_stats()
 
     @Worker.timer("actor/recv_traj")
@@ -412,14 +420,25 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
 
         if self.demo_buffer is not None:
             intervene_traj_list = []
+            elite_traj_list = []
+            demo_cfg = self.cfg.algorithm.demo_buffer
+            elite_threshold = demo_cfg.get("promote_reward_threshold", None)
             for traj in recv_list:
                 assert isinstance(traj, Trajectory)
                 intervene_trajs = traj.extract_intervene_traj()
                 if intervene_trajs is not None:
                     intervene_traj_list.extend(intervene_trajs)
+                if elite_threshold is not None:
+                    elite = extract_reward_elite_trajectory(
+                        traj, float(elite_threshold)
+                    )
+                    if elite is not None:
+                        elite_traj_list.append(elite)
 
-            if len(intervene_traj_list) > 0:
+            if intervene_traj_list:
                 self.demo_buffer.add_trajectories(intervene_traj_list)
+            if elite_traj_list:
+                self.demo_buffer.add_trajectories(elite_traj_list)
 
     @Worker.timer("forward_critic")
     def forward_critic(self, batch):

@@ -58,6 +58,7 @@ def _repoint_libero_config(libero_module) -> None:
 
 
 logger = get_logger()
+_MAX_AGENTIC_REWARD_COMPONENTS = 8
 
 
 def _read_bddl_language_and_goal(bddl_path: str):
@@ -720,6 +721,17 @@ class LiberoEnv(gym.Env):
         self.returns = np.zeros(self.num_envs)
         self.success_episode_len = np.zeros(self.num_envs, dtype=np.int32)
         self.agentic_completion_return = np.zeros(self.num_envs)
+        self.agentic_raw_completion_return = np.zeros(self.num_envs)
+        self.agentic_completion_once = np.zeros(self.num_envs, dtype=bool)
+        self.agentic_completion_previous = np.zeros(self.num_envs, dtype=bool)
+        self.agentic_completion_regressions = np.zeros(self.num_envs, dtype=np.int32)
+        self.success_previous = np.zeros(self.num_envs, dtype=bool)
+        self.success_regressions = np.zeros(self.num_envs, dtype=np.int32)
+        component_shape = (self.num_envs, _MAX_AGENTIC_REWARD_COMPONENTS)
+        self.agentic_condition_return = np.zeros(component_shape)
+        self.agentic_condition_final = np.zeros(component_shape)
+        self.agentic_term_max = np.zeros(component_shape)
+        self.agentic_term_final = np.zeros(component_shape)
         self.agentic_potential_delta_return = np.zeros(self.num_envs)
         self.agentic_potential = np.zeros(self.num_envs)
         self._task_success_stats: dict[int, dict[str, int]] = {}
@@ -735,6 +747,16 @@ class LiberoEnv(gym.Env):
             self.returns[mask] = 0
             self.success_episode_len[mask] = 0
             self.agentic_completion_return[mask] = 0.0
+            self.agentic_raw_completion_return[mask] = 0.0
+            self.agentic_completion_once[mask] = False
+            self.agentic_completion_previous[mask] = False
+            self.agentic_completion_regressions[mask] = 0
+            self.success_previous[mask] = False
+            self.success_regressions[mask] = 0
+            self.agentic_condition_return[mask] = 0.0
+            self.agentic_condition_final[mask] = 0.0
+            self.agentic_term_max[mask] = 0.0
+            self.agentic_term_final[mask] = 0.0
             self.agentic_potential_delta_return[mask] = 0.0
             self.agentic_potential[mask] = 0.0
             self._elapsed_steps[env_idx] = 0
@@ -745,12 +767,27 @@ class LiberoEnv(gym.Env):
             self.returns[:] = 0.0
             self.success_episode_len[:] = 0
             self.agentic_completion_return[:] = 0.0
+            self.agentic_raw_completion_return[:] = 0.0
+            self.agentic_completion_once[:] = False
+            self.agentic_completion_previous[:] = False
+            self.agentic_completion_regressions[:] = 0
+            self.success_previous[:] = False
+            self.success_regressions[:] = 0
+            self.agentic_condition_return[:] = 0.0
+            self.agentic_condition_final[:] = 0.0
+            self.agentic_term_max[:] = 0.0
+            self.agentic_term_final[:] = 0.0
             self.agentic_potential_delta_return[:] = 0.0
             self.agentic_potential[:] = 0.0
             self._elapsed_steps[:] = 0
 
     def _record_metrics(self, step_reward, terminations, infos, agentic_step=None):
         episode_info = {}
+        # Simulator success is retained only as an independent audit verifier.
+        # It never enters step_reward when agentic_reward is enabled.
+        self.success_regressions += self.success_previous & ~terminations
+        self.success_previous = terminations.copy()
+
         # Only accumulate returns while not yet succeeded
         self.returns += step_reward * (~self.success_once)
         # Record episode_len at first success
@@ -780,12 +817,73 @@ class LiberoEnv(gym.Env):
             episode_len_for_reward, 1
         )
         if agentic_step is not None:
+            completion_now = agentic_step.completion.astype(bool)
             self.agentic_completion_return += agentic_step.completion
+            self.agentic_raw_completion_return += agentic_step.raw_completion
+            self.agentic_completion_regressions += (
+                self.agentic_completion_previous & ~completion_now
+            )
+            self.agentic_completion_previous = completion_now
+            self.agentic_completion_once |= completion_now
             self.agentic_potential_delta_return += agentic_step.potential_delta
             self.agentic_potential = agentic_step.potential.astype(np.float64)
+
+            condition_count = agentic_step.condition_pass.shape[1]
+            term_count = agentic_step.term_scores.shape[1]
+            self.agentic_condition_return[:, :condition_count] += (
+                agentic_step.condition_pass
+            )
+            self.agentic_condition_final[:, :condition_count] = (
+                agentic_step.condition_pass
+            )
+            self.agentic_term_max[:, :term_count] = np.maximum(
+                self.agentic_term_max[:, :term_count], agentic_step.term_scores
+            )
+            self.agentic_term_final[:, :term_count] = agentic_step.term_scores
+
+            success_once = self.success_once
+            success_at_end = terminations.astype(bool)
+            completion_once = self.agentic_completion_once
             episode_info["physical_completion_occupancy"] = (
                 self.agentic_completion_return.copy()
             )
+            episode_info["physical_raw_completion_occupancy"] = (
+                self.agentic_raw_completion_return.copy()
+            )
+            episode_info["physical_completion_once"] = completion_once.copy()
+            episode_info["physical_completion_at_end"] = completion_now.copy()
+            episode_info["physical_completion_regressions"] = (
+                self.agentic_completion_regressions.copy()
+            )
+            episode_info["success_regressions"] = self.success_regressions.copy()
+            episode_info["physical_completion_tp_once"] = completion_once & success_once
+            episode_info["physical_completion_fp_once"] = (
+                completion_once & ~success_once
+            )
+            episode_info["physical_completion_fn_once"] = (
+                ~completion_once & success_once
+            )
+            episode_info["physical_completion_tp_end"] = completion_now & success_at_end
+            episode_info["physical_completion_fp_end"] = (
+                completion_now & ~success_at_end
+            )
+            episode_info["physical_completion_fn_end"] = (
+                ~completion_now & success_at_end
+            )
+            for index in range(condition_count):
+                episode_info[f"physical_condition_{index}_occupancy"] = (
+                    self.agentic_condition_return[:, index].copy()
+                )
+                episode_info[f"physical_condition_{index}_at_end"] = (
+                    self.agentic_condition_final[:, index].copy()
+                )
+            for index in range(term_count):
+                episode_info[f"physical_term_{index}_max"] = self.agentic_term_max[
+                    :, index
+                ].copy()
+                episode_info[f"physical_term_{index}_final"] = self.agentic_term_final[
+                    :, index
+                ].copy()
             episode_info["physical_potential_delta"] = (
                 self.agentic_potential_delta_return.copy()
             )
@@ -968,6 +1066,9 @@ class LiberoEnv(gym.Env):
             infos["agentic_reward"] = to_tensor(
                 {
                     "completion": agentic_step.completion,
+                    "raw_completion": agentic_step.raw_completion,
+                    "condition_pass": agentic_step.condition_pass,
+                    "term_scores": agentic_step.term_scores,
                     "potential": agentic_step.potential,
                     "potential_delta": agentic_step.potential_delta,
                     "revision": np.full(

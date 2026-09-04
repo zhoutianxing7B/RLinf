@@ -32,9 +32,14 @@ _FORBIDDEN_REFERENCE_PARTS = (
     "success",
     "termination",
 )
-_SUPPORTED_TERM_TYPES = frozenset({"distance", "height_delta", "scalar"})
-_SUPPORTED_CONDITION_TYPES = frozenset({"distance", "scalar"})
+_SUPPORTED_TERM_TYPES = frozenset(
+    {"distance", "height_delta", "relative_scalar", "scalar"}
+)
+_SUPPORTED_CONDITION_TYPES = frozenset(
+    {"delta_distance", "distance", "relative_scalar", "scalar"}
+)
 _SUPPORTED_OPERATORS = frozenset({"gt", "lt"})
+_MAX_COMPONENTS = 8
 
 
 class PhysicalRewardProgramError(ValueError):
@@ -116,8 +121,8 @@ def validate_physical_reward_program(
     completion_bonus = _finite_float(
         program.get("completion_bonus", 1.0), "completion_bonus"
     )
-    if not 0.0 < completion_bonus <= 10.0:
-        raise PhysicalRewardProgramError("completion_bonus must be in (0, 10].")
+    if not math.isclose(completion_bonus, 1.0, rel_tol=0.0, abs_tol=1e-9):
+        raise PhysicalRewardProgramError("completion_bonus must equal 1.0.")
     hold_steps = int(program.get("completion_hold_steps", 1))
     if not 1 <= hold_steps <= 32:
         raise PhysicalRewardProgramError("completion_hold_steps must be in [1, 32].")
@@ -133,6 +138,10 @@ def validate_physical_reward_program(
     conditions = program.get("completion_conditions")
     if not isinstance(conditions, list) or not conditions:
         raise PhysicalRewardProgramError("completion_conditions must be non-empty.")
+    if len(conditions) > _MAX_COMPONENTS:
+        raise PhysicalRewardProgramError(
+            f"completion_conditions cannot exceed {_MAX_COMPONENTS}."
+        )
     normalized_conditions: list[dict[str, Any]] = []
     for index, raw in enumerate(conditions):
         if (
@@ -162,11 +171,26 @@ def validate_physical_reward_program(
                     "axes": list(_validate_axes(raw.get("axes", [0, 1, 2]))),
                 }
             )
-        else:
+        elif condition_type == "scalar":
             normalized.update(
                 {
                     "key": _validate_reference(raw.get("key"), key_set),
                     "index": int(raw.get("index", 0)),
+                }
+            )
+        elif condition_type == "relative_scalar":
+            normalized.update(
+                {
+                    "left": _validate_reference(raw.get("left"), key_set),
+                    "right": _validate_reference(raw.get("right"), key_set),
+                    "index": int(raw.get("index", 0)),
+                }
+            )
+        else:
+            normalized.update(
+                {
+                    "key": _validate_reference(raw.get("key"), key_set),
+                    "axes": list(_validate_axes(raw.get("axes", [0, 1, 2]))),
                 }
             )
         normalized_conditions.append(normalized)
@@ -174,6 +198,10 @@ def validate_physical_reward_program(
     terms = program.get("potential_terms")
     if not isinstance(terms, list) or not terms:
         raise PhysicalRewardProgramError("potential_terms must be non-empty.")
+    if len(terms) > _MAX_COMPONENTS:
+        raise PhysicalRewardProgramError(
+            f"potential_terms cannot exceed {_MAX_COMPONENTS}."
+        )
     normalized_terms: list[dict[str, Any]] = []
     total_weight = 0.0
     for index, raw in enumerate(terms):
@@ -196,7 +224,7 @@ def validate_physical_reward_program(
                     "axes": list(_validate_axes(raw.get("axes", [0, 1, 2]))),
                 }
             )
-        else:
+        elif term_type in {"height_delta", "scalar"}:
             normalized.update(
                 {
                     "key": _validate_reference(raw.get("key"), key_set),
@@ -207,6 +235,15 @@ def validate_physical_reward_program(
                 normalized["target"] = _finite_float(
                     raw.get("target"), f"term[{index}].target"
                 )
+        else:
+            normalized.update(
+                {
+                    "left": _validate_reference(raw.get("left"), key_set),
+                    "right": _validate_reference(raw.get("right"), key_set),
+                    "index": int(raw.get("index", 0)),
+                    "target": _finite_float(raw.get("target"), f"term[{index}].target"),
+                }
+            )
         normalized_terms.append(normalized)
     if total_weight > 1.0 + 1e-9:
         raise PhysicalRewardProgramError(
@@ -257,8 +294,11 @@ class PhysicalRewardStep:
 
     rewards: np.ndarray
     completion: np.ndarray
+    raw_completion: np.ndarray
     potential: np.ndarray
     potential_delta: np.ndarray
+    condition_pass: np.ndarray
+    term_scores: np.ndarray
     revision: int
     digest: str
 
@@ -284,6 +324,9 @@ class PhysicalPotentialRewardRuntime:
         self.program: dict[str, Any] = {}
         self.digest = ""
         self._baseline: list[dict[str, np.ndarray]] = [{} for _ in range(num_envs)]
+        self._previous_state: list[dict[str, np.ndarray]] = [
+            {} for _ in range(num_envs)
+        ]
         self._previous_potential = np.zeros(num_envs, dtype=np.float64)
         self._hold = np.zeros(num_envs, dtype=np.int32)
         self._reload(force=True)
@@ -335,6 +378,14 @@ class PhysicalPotentialRewardRuntime:
             self._baseline[env_index] = {
                 key: self._array(observation, key).copy() for key in keys
             }
+            temporal_keys = {
+                str(condition["key"])
+                for condition in self.program["completion_conditions"]
+                if condition["type"] == "delta_distance"
+            }
+            self._previous_state[env_index] = {
+                key: self._array(observation, key).copy() for key in temporal_keys
+            }
             self._hold[env_index] = 0
             self._previous_potential[env_index] = self._potential(
                 observation, env_index
@@ -352,8 +403,10 @@ class PhysicalPotentialRewardRuntime:
             )
         return float(np.linalg.norm(left[axes] - right[axes]))
 
-    def _potential(self, observation: Mapping[str, Any], env_index: int) -> float:
-        value = 0.0
+    def _potential_with_terms(
+        self, observation: Mapping[str, Any], env_index: int
+    ) -> tuple[float, np.ndarray]:
+        scores: list[float] = []
         for term in self.program["potential_terms"]:
             term_type = term["type"]
             if term_type == "distance":
@@ -366,19 +419,46 @@ class PhysicalPotentialRewardRuntime:
                     ).copy()
                 baseline = self._baseline[env_index][term["key"]][term["index"]]
                 score = float(np.clip((current - baseline) / term["scale"], 0.0, 1.0))
-            else:
+            elif term_type == "scalar":
                 current = self._array(observation, term["key"])[term["index"]]
                 score = math.exp(-abs(current - term["target"]) / term["scale"])
-            value += term["weight"] * score
-        return float(np.clip(value, 0.0, 1.0))
+            else:
+                left = self._array(observation, term["left"])[term["index"]]
+                right = self._array(observation, term["right"])[term["index"]]
+                score = math.exp(-abs((left - right) - term["target"]) / term["scale"])
+            scores.append(float(score))
+        value = sum(
+            term["weight"] * score
+            for term, score in zip(self.program["potential_terms"], scores, strict=True)
+        )
+        return float(np.clip(value, 0.0, 1.0)), np.asarray(scores, dtype=np.float64)
+
+    def _potential(self, observation: Mapping[str, Any], env_index: int) -> float:
+        return self._potential_with_terms(observation, env_index)[0]
 
     def _condition(
-        self, observation: Mapping[str, Any], spec: Mapping[str, Any]
+        self,
+        observation: Mapping[str, Any],
+        spec: Mapping[str, Any],
+        env_index: int,
     ) -> bool:
         if spec["type"] == "distance":
             value = self._distance(observation, spec)
-        else:
+        elif spec["type"] == "scalar":
             value = float(self._array(observation, spec["key"])[spec["index"]])
+        elif spec["type"] == "relative_scalar":
+            left = self._array(observation, spec["left"])[spec["index"]]
+            right = self._array(observation, spec["right"])[spec["index"]]
+            value = float(left - right)
+        else:
+            current = self._array(observation, spec["key"])
+            previous = self._previous_state[env_index].get(spec["key"], current)
+            axes = np.asarray(spec["axes"], dtype=np.int64)
+            if axes.max(initial=0) >= min(current.size, previous.size):
+                raise PhysicalRewardProgramError(
+                    "A delta_distance axis exceeds its physical vector."
+                )
+            value = float(np.linalg.norm(current[axes] - previous[axes]))
         return (
             value < spec["threshold"]
             if spec["op"] == "lt"
@@ -407,8 +487,16 @@ class PhysicalPotentialRewardRuntime:
             else np.asarray(terminal, dtype=bool)
         )
         completion = np.zeros(self.num_envs, dtype=np.float64)
+        raw_completion = np.zeros(self.num_envs, dtype=np.float64)
         potential = np.zeros(self.num_envs, dtype=np.float64)
         potential_delta = np.zeros(self.num_envs, dtype=np.float64)
+        condition_pass = np.zeros(
+            (self.num_envs, len(self.program["completion_conditions"])),
+            dtype=np.float64,
+        )
+        term_scores = np.zeros(
+            (self.num_envs, len(self.program["potential_terms"])), dtype=np.float64
+        )
         task_allowlist = set(self.program["task_ids"])
         for env_index, (observation, task_id) in enumerate(
             zip(observations, task_ids, strict=True)
@@ -416,12 +504,21 @@ class PhysicalPotentialRewardRuntime:
             if int(task_id) not in task_allowlist:
                 self._hold[env_index] = 0
                 continue
-            current_potential = self._potential(observation, env_index)
-            potential[env_index] = current_potential
-            completed_now = all(
-                self._condition(observation, condition)
-                for condition in self.program["completion_conditions"]
+            current_potential, current_term_scores = self._potential_with_terms(
+                observation, env_index
             )
+            potential[env_index] = current_potential
+            term_scores[env_index] = current_term_scores
+            passed = np.asarray(
+                [
+                    self._condition(observation, condition, env_index)
+                    for condition in self.program["completion_conditions"]
+                ],
+                dtype=np.float64,
+            )
+            condition_pass[env_index] = passed
+            completed_now = bool(passed.all())
+            raw_completion[env_index] = float(completed_now)
             self._hold[env_index] = self._hold[env_index] + 1 if completed_now else 0
             completion[env_index] = float(
                 self._hold[env_index] >= self.program["completion_hold_steps"]
@@ -433,6 +530,11 @@ class PhysicalPotentialRewardRuntime:
                     - self._previous_potential[env_index]
                 )
             self._previous_potential[env_index] = current_potential
+            for condition in self.program["completion_conditions"]:
+                if condition["type"] == "delta_distance":
+                    self._previous_state[env_index][condition["key"]] = self._array(
+                        observation, condition["key"]
+                    ).copy()
         rewards = (
             self.program["completion_bonus"] * completion
             + self.program["potential_scale"] * potential_delta
@@ -440,8 +542,11 @@ class PhysicalPotentialRewardRuntime:
         return PhysicalRewardStep(
             rewards=rewards.astype(np.float32),
             completion=completion.astype(np.float32),
+            raw_completion=raw_completion.astype(np.float32),
             potential=potential.astype(np.float32),
             potential_delta=potential_delta.astype(np.float32),
+            condition_pass=condition_pass.astype(np.float32),
+            term_scores=term_scores.astype(np.float32),
             revision=self.revision,
             digest=self.digest,
         )

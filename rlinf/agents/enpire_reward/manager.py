@@ -169,13 +169,16 @@ class LunaRewardManager:
                 "rationale": "one concise causal hypothesis",
                 "task_ids": scene_context["task_ids"],
                 "gamma": expected_gamma,
-                "completion_bonus": "number in (0, 10]",
+                "completion_bonus": "fixed number 1.0",
                 "completion_hold_steps": "integer in [1, 32]",
                 "completion_conditions": [
                     {
-                        "type": "distance or scalar",
+                        "type": (
+                            "distance, scalar, relative_scalar, or delta_distance"
+                        ),
                         "references": "available physical keys only",
-                        "axes": "optional coordinate indices",
+                        "axes": "coordinate indices for distance/delta_distance",
+                        "index": "coordinate for scalar/relative_scalar",
                         "op": "lt or gt",
                         "threshold": "physical-unit threshold",
                     }
@@ -183,9 +186,9 @@ class LunaRewardManager:
                 "potential_scale": ("number in [0, 0.25 * completion_bonus]"),
                 "potential_terms": [
                     {
-                        "type": "distance, height_delta, or scalar",
+                        "type": ("distance, height_delta, scalar, or relative_scalar"),
                         "references": "available physical keys only",
-                        "target": "required only for scalar",
+                        "target": "required for scalar/relative_scalar",
                         "scale": "positive physical-unit scale",
                         "weight": "nonnegative; all weights sum <= 1",
                     }
@@ -194,6 +197,33 @@ class LunaRewardManager:
             "executed_formula": (
                 "C(s_next) + potential_scale * (gamma*Phi(s_next)-Phi(s))"
             ),
+            "physical_semantics": {
+                "relative_scalar": "left[index] - right[index]",
+                "delta_distance": (
+                    "norm of one tracked key's displacement since the prior frame; "
+                    "usable as a real-sensor stability/contact proxy"
+                ),
+                "distance": "Euclidean separation over selected axes",
+                "height_delta": "positive displacement from the episode reset pose",
+            },
+            "audit_semantics": {
+                "physical_completion_tp_once": (
+                    "physical verifier and independent task verifier both fired"
+                ),
+                "physical_completion_fp_once": (
+                    "physical verifier fired but independent task verifier never did"
+                ),
+                "physical_completion_fn_once": (
+                    "independent task verifier fired but physical verifier never did"
+                ),
+                "success_regressions": (
+                    "task became false after first becoming true because rollout "
+                    "continued; do not mistake this for a completion false positive"
+                ),
+                "condition_i_occupancy": (
+                    "per-condition pass count; use it to identify the weak gate"
+                ),
+            },
             "forbidden_inputs": [
                 "environment reward",
                 "simulator success or task predicates",
@@ -214,16 +244,22 @@ class LunaRewardManager:
                 "role": "system",
                 "content": (
                     "You are the reward-evolution module in an ENPIRE-style "
-                    "robot RL loop. Return exactly one JSON reward program. "
-                    "Improve learnability while preserving the physical "
-                    "completion objective. Diagnose measured failure history. "
-                    "Explicitly compare physical completion occupancy against "
-                    "simulator success: high occupancy with low success means "
-                    "the physical completion proxy has false positives and must "
-                    "be tightened rather than amplified. Low occupancy with low "
-                    "success instead calls for better potential shaping. "
-                    "Do not invent unavailable signals, code, hard curricula, "
-                    "or policy actions."
+                    "robot RL loop, using a Reward-as-An-Agent verification-first "
+                    "design. Return exactly one JSON reward program. First infer "
+                    "the task stages and physical completion semantics from the "
+                    "task and scene; then diagnose verifier precision/recall, "
+                    "stability, and SAC learnability from recent experiments. "
+                    "Use TP/FP/FN and per-condition evidence for verifier changes. "
+                    "Do not infer false positives from completion occupancy alone: "
+                    "rollouts continue after success, so occupancy and "
+                    "success_at_end are not directly comparable. For an object "
+                    "placed on a support, prefer signed relative height plus XY "
+                    "alignment and low inter-frame displacement over absolute "
+                    "height distance alone. Keep potential terms bounded and "
+                    "stage-aligned. Independent simulator success may be used only "
+                    "as audit evidence here and must never appear in the executable "
+                    "program. Do not invent unavailable signals, code, hard "
+                    "curricula, images, or policy actions."
                 ),
             },
             {

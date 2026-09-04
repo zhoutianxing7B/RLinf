@@ -50,5 +50,28 @@
       0.2147,
       0.9025
     ]
+  },
+  "task_stage_hypotheses": [
+    {
+      "stage": "approach",
+      "observable": "robot0_eef_pos approaches akita_black_bowl_1_pos"
+    },
+    {
+      "stage": "lift",
+      "observable": "akita_black_bowl_1_pos rises relative to its reset pose"
+    },
+    {
+      "stage": "transport",
+      "observable": "akita_black_bowl_1_pos approaches plate_1_pos in XY"
+    },
+    {
+      "stage": "place_and_stabilize",
+      "observable": "bowl is XY-aligned, its signed center height is slightly above the plate, and tracked bowl displacement remains low for several frames"
+    }
+  ],
+  "deployable_derived_signals": {
+    "relative_scalar": "difference of two simultaneous tracked scalar coordinates",
+    "delta_distance": "frame-to-frame displacement from the same calibrated object tracker",
+    "height_delta": "tracked height relative to the episode reset observation"
   }
 }

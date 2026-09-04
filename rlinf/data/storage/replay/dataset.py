@@ -90,13 +90,18 @@ class ReplayBufferDataset(IterableDataset):
             is_ready = True
             if not self.replay_buffer.is_ready(self.min_replay_buffer_size):
                 is_ready = False
-            if self.demo_buffer is not None and not self.demo_buffer.is_ready(
-                self.min_demo_buffer_size
+            demo_available = (
+                self.demo_buffer is not None and self.demo_buffer.total_samples > 0
+            )
+            if (
+                self.demo_buffer is not None
+                and self.min_demo_buffer_size > 0
+                and not self.demo_buffer.is_ready(self.min_demo_buffer_size)
             ):
                 is_ready = False
 
             if is_ready:
-                if self.demo_buffer is not None:
+                if demo_available:
                     replay_batch = self.replay_buffer.sample(self.batch_size // 2)
                     demo_batch = self.demo_buffer.sample(self.batch_size // 2)
                     batch = concat_batch(replay_batch, demo_batch)
@@ -189,13 +194,18 @@ class PreloadReplayBufferDataset(ReplayBufferDataset):
             is_ready = True
             if not self.replay_buffer.is_ready(self.min_replay_buffer_size):
                 is_ready = False
-            if self.demo_buffer is not None and not self.demo_buffer.is_ready(
-                self.min_demo_buffer_size
+            demo_available = (
+                self.demo_buffer is not None and self.demo_buffer.total_samples > 0
+            )
+            if (
+                self.demo_buffer is not None
+                and self.min_demo_buffer_size > 0
+                and not self.demo_buffer.is_ready(self.min_demo_buffer_size)
             ):
                 is_ready = False
 
             if is_ready:
-                if self.demo_buffer is not None:
+                if demo_available:
                     replay_batch = self.replay_buffer.sample(self.batch_size // 2)
                     demo_batch = self.demo_buffer.sample(self.batch_size // 2)
                     batch = concat_batch(replay_batch, demo_batch)
