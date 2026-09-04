@@ -192,19 +192,25 @@ class EmbodiedRunner:
         rollout_handle.wait()
 
     def evaluate(self):
-        env_handle: Handle = self.env.evaluate(
-            input_channel=self.env_channel,
-            rollout_channel=self.rollout_channel,
-        )
-        rollout_handle: Handle = self.rollout.evaluate(
-            input_channel=self.rollout_channel,
-            output_channel=self.env_channel,
-        )
-        env_results = env_handle.wait()
-        rollout_handle.wait()
-        eval_metrics_list = [results for results in env_results if results is not None]
-        eval_metrics = compute_evaluate_metrics(eval_metrics_list)
-        return eval_metrics
+        eval_metrics_list = []
+        eval_repeats = int(self.cfg.runner.get("eval_repeats", 1))
+        if eval_repeats < 1:
+            raise ValueError("runner.eval_repeats must be positive.")
+        for _ in range(eval_repeats):
+            env_handle: Handle = self.env.evaluate(
+                input_channel=self.env_channel,
+                rollout_channel=self.rollout_channel,
+            )
+            rollout_handle: Handle = self.rollout.evaluate(
+                input_channel=self.rollout_channel,
+                output_channel=self.env_channel,
+            )
+            env_results = env_handle.wait()
+            rollout_handle.wait()
+            eval_metrics_list.extend(
+                results for results in env_results if results is not None
+            )
+        return compute_evaluate_metrics(eval_metrics_list)
 
     def _log_ranked_metrics(
         self,

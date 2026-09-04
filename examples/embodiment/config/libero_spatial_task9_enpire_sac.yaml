@@ -30,6 +30,7 @@ runner:
   max_steps: 100
   only_eval: false
   val_check_interval: 5
+  eval_repeats: 2
   save_interval: 5
   weight_sync_interval: 1
 
@@ -113,7 +114,7 @@ env:
       reload_interval_steps: 16
   eval:
     rollout_epoch: 1
-    total_num_envs: 100
+    total_num_envs: 50
     auto_reset: true
     ignore_terminations: true
     use_rel_reward: false
