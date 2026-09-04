@@ -158,6 +158,9 @@ def test_controller_scores_disjoint_panel_ratios(tmp_path):
     )
     assert panels == pytest.approx({"a": 0.8, "b": 0.7})
     assert score == pytest.approx(0.7)
+    report = (tmp_path / "audit" / "report.md").read_text()
+    assert "Agentic Reward Audit" in report
+    assert "Simulator reward" in report
 
 
 def test_controller_warmup_and_candidate_patience(tmp_path, monkeypatch):

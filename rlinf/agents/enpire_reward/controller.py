@@ -11,6 +11,7 @@ import json
 import math
 import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -74,6 +75,7 @@ class RewardEvolutionController:
         self.audit_dir = Path(audit_dir)
         self.state_path = self.audit_dir / "state.json"
         self.event_path = self.audit_dir / "events.jsonl"
+        self.report_path = self.audit_dir / "report.md"
         self.expected_gamma = float(expected_gamma)
         self.score_keys = tuple(str(key) for key in score_keys)
         self.score_panels = {
@@ -141,6 +143,7 @@ class RewardEvolutionController:
         self.state.setdefault("baseline_evaluations", 0)
         self.state.setdefault("champion_stale_evaluations", 0)
         self.state.setdefault("manager_cycle_started", False)
+        self._write_report()
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any]) -> "RewardEvolutionController":
@@ -183,10 +186,94 @@ class RewardEvolutionController:
         os.replace(temporary, self.state_path)
 
     def _append_event(self, event: Mapping[str, Any]) -> None:
+        record = dict(event)
+        record.setdefault("timestamp_utc", datetime.now(timezone.utc).isoformat())
         with self.event_path.open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(event, sort_keys=True) + "\n")
+            stream.write(json.dumps(record, sort_keys=True) + "\n")
             stream.flush()
             os.fsync(stream.fileno())
+
+    def _read_events(self) -> list[dict[str, Any]]:
+        if not self.event_path.exists():
+            return []
+        events = []
+        for line in self.event_path.read_text().splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict):
+                events.append(event)
+        return events
+
+    def _write_report(self) -> None:
+        """Atomically refresh a secret-free human-readable campaign audit."""
+        events = self._read_events()
+        evaluations = [event for event in events if event.get("kind") == "evaluation"]
+        proposals = [event for event in events if event.get("kind") == "proposal"]
+        failures = [event for event in events if event.get("kind") == "manager_failure"]
+        rollbacks = [
+            event
+            for event in evaluations
+            if str(event.get("action", "")).startswith("rollback")
+        ]
+        token_total = sum(
+            int(event.get("proposal", {}).get("usage", {}).get("total_tokens", 0))
+            for event in proposals
+        )
+        current = json.loads(self.program_path.read_text())
+        manager = self.state.get("manager", {})
+        lines = [
+            "# Agentic Reward Audit",
+            "",
+            f"Updated: {datetime.now(timezone.utc).isoformat()}",
+            "",
+            f"- Current reward: `{current.get('name', 'unknown')}`",
+            f"- Current rationale: {current.get('rationale', '')}",
+            f"- Conservative champion score: {self.state.get('champion_score')}",
+            f"- Luna model: `{manager.get('model', self.manager.config.model)}`",
+            f"- Luna requests: {manager.get('request_count', 0)}",
+            f"- Luna tokens recorded: {token_total}",
+            f"- Luna wall time: {float(manager.get('total_seconds', 0.0)):.3f}s",
+            f"- Rollbacks: {len(rollbacks)}",
+            f"- Manager failures: {len(failures)}",
+            "",
+            "## Evaluation History",
+            "",
+            "| Step | Action | Min score | Panels | Physical TP/FP/FN | Elite samples |",
+            "| ---: | --- | ---: | --- | --- | ---: |",
+        ]
+        for event in evaluations:
+            metrics = event.get("metrics", {})
+            panel = ", ".join(
+                f"{key}={float(value):.3f}"
+                for key, value in event.get("score_panel", {}).items()
+            )
+            physical = "/".join(
+                str(metrics.get(f"env/physical_completion_{kind}_once", "-"))
+                for kind in ("tp", "fp", "fn")
+            )
+            elite_samples = metrics.get("train/demo_buffer/total_samples", "-")
+            lines.append(
+                f"| {event.get('step', '-')} | {event.get('action', '-')} | "
+                f"{float(event.get('score', 0.0)):.3f} | {panel} | {physical} | "
+                f"{elite_samples} |"
+            )
+        lines.extend(
+            [
+                "",
+                "## Guardrails",
+                "",
+                "The executable reward uses only scene physical observations. "
+                "Simulator reward, success predicates, actions, images, and done flags "
+                "are forbidden reward inputs. Independent success is retained only for "
+                "evaluation and verifier precision/recall auditing.",
+                "",
+            ]
+        )
+        temporary = self.report_path.with_suffix(f".tmp-{os.getpid()}")
+        temporary.write_text("\n".join(lines))
+        os.replace(temporary, self.report_path)
 
     def _score(self, metrics: Mapping[str, Any]) -> tuple[float, dict[str, float]]:
         panel: dict[str, float] = {}
@@ -388,6 +475,7 @@ class RewardEvolutionController:
             candidate_digest, _ = self._propose_next()
             manager_called = candidate_digest is not None
         self._save_state()
+        self._write_report()
         return EvolutionDecision(
             action=action,
             score=score,
