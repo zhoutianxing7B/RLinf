@@ -23,7 +23,10 @@ import torch.nn.functional as F
 from omegaconf import DictConfig
 from torch.utils.data import DataLoader
 
-from rlinf.algorithms.sac_utils import discounted_chunk_rewards
+from rlinf.algorithms.sac_utils import (
+    behavior_regularized_actor_loss,
+    discounted_chunk_rewards,
+)
 from rlinf.config import SupportedModel
 from rlinf.data.schema.embodied_types import Trajectory
 from rlinf.data.storage.replay import (
@@ -70,9 +73,7 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
                 f"missing={missing}, unexpected={incompatible.unexpected_keys}"
             )
         self.logger.info("Initialized actor parameters from %s.", warmup_path)
-        warmup_action_std = float(
-            self.cfg.actor.model.get("warmup_action_std", 0.0)
-        )
+        warmup_action_std = float(self.cfg.actor.model.get("warmup_action_std", 0.0))
         if warmup_action_std:
             if not 1.0e-5 <= warmup_action_std <= 1.0:
                 raise ValueError("warmup_action_std must be in [1e-5, 1].")
@@ -134,6 +135,30 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
         # Record the original trainable parameter names before FSDP wrapping.
         # Persistent buffer names are also recorded for selective weight syncing.
         self.param_names_need_sync = collect_param_names_need_sync(module)
+
+        actor_trainable_modules = tuple(
+            str(name) for name in self.cfg.algorithm.get("actor_trainable_modules", [])
+        )
+        if actor_trainable_modules:
+            actor_parameter_count = 0
+            for name, parameter in module.named_parameters():
+                if "q_head" in name:
+                    continue
+                trainable = any(
+                    module_name in name for module_name in actor_trainable_modules
+                )
+                parameter.requires_grad_(trainable)
+                if trainable:
+                    actor_parameter_count += parameter.numel()
+            if actor_parameter_count == 0:
+                raise ValueError(
+                    "actor_trainable_modules did not match any actor parameters"
+                )
+            self.logger.info(
+                "Restricted SAC actor updates to %s (%d parameters).",
+                actor_trainable_modules,
+                actor_parameter_count,
+            )
 
         # build model, optimizer, lr_scheduler, grad_scaler
         self.model = self._strategy.wrap_model(
@@ -576,7 +601,20 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
         elif agg_q == "mean":
             qf_pi = torch.mean(all_qf_pi, dim=1, keepdim=True)
         metrics["q_pi"] = qf_pi.mean().item()
-        actor_loss = ((self.entropy_temp.alpha * log_pi) - qf_pi).mean()
+        sac_actor_loss = ((self.entropy_temp.alpha * log_pi) - qf_pi).mean()
+        behavior_coefficient = float(
+            self.cfg.algorithm.get("actor_behavior_coefficient", 0.0)
+        )
+        behavior_actions = batch["actions"].to(device=pi.device, dtype=pi.dtype)
+        actor_loss, behavior_loss = behavior_regularized_actor_loss(
+            sac_actor_loss,
+            pi,
+            behavior_actions,
+            behavior_coefficient,
+        )
+        metrics["sac_objective"] = sac_actor_loss.item()
+        metrics["behavior_loss"] = behavior_loss.item()
+        metrics["behavior_coefficient"] = behavior_coefficient
 
         entropy = -log_pi.mean()
         return actor_loss, entropy, metrics

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 
 
 def discounted_chunk_rewards(rewards: torch.Tensor, gamma: float) -> torch.Tensor:
@@ -27,3 +28,28 @@ def discounted_chunk_rewards(rewards: torch.Tensor, gamma: float) -> torch.Tenso
         torch.arange(rewards.shape[-1], device=rewards.device, dtype=rewards.dtype),
     )
     return (rewards * discounts).sum(dim=-1, keepdim=True)
+
+
+def behavior_regularized_actor_loss(
+    sac_actor_loss: torch.Tensor,
+    policy_actions: torch.Tensor,
+    behavior_actions: torch.Tensor,
+    coefficient: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Anchor an SAC actor to replay behavior while still optimizing Q.
+
+    The replay action is an action label, never a reward. This conservative
+    term prevents a high-dimensional actor from immediately exploiting Q
+    extrapolation errors outside the data collected by the warm-start policy.
+    """
+    coefficient = float(coefficient)
+    if not 0.0 <= coefficient < float("inf"):
+        raise ValueError(
+            "behavior regularization coefficient must be finite and non-negative"
+        )
+    if policy_actions.shape != behavior_actions.shape:
+        raise ValueError(
+            "policy and replay behavior actions must have identical shapes"
+        )
+    behavior_loss = F.mse_loss(policy_actions, behavior_actions.detach())
+    return sac_actor_loss + coefficient * behavior_loss, behavior_loss

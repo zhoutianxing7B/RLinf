@@ -63,7 +63,7 @@ class CNNConfig:
             if self.action_scale is None:
                 self.action_scale = -1, 1
             self.final_tanh = True
-            if self.backbone == "resnet":
+            if self.backbone == "resnet" and self.std_range is None:
                 self.std_range = (1e-5, 5)
 
         assert self.model_path is not None, "Please specify the model_path."
