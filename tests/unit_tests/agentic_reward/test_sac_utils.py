@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from rlinf.algorithms.sac_utils import (
+    actor_checkpoint_with_fresh_q_state_dict,
     actor_only_warmup_state_dict,
     behavior_regularized_actor_loss,
     discounted_chunk_rewards,
@@ -83,3 +84,28 @@ def test_actor_warmup_discards_reward_specific_q_heads():
     }
     filtered = actor_only_warmup_state_dict(state)
     assert set(filtered) == {"encoder.weight", "actor_mean.weight"}
+
+
+def test_reward_revision_restores_actor_but_resets_q_heads():
+    checkpoint = {
+        "encoder.weight": torch.tensor([1.0]),
+        "actor_mean.weight": torch.tensor([2.0]),
+        "q_head.0.weight": torch.tensor([99.0]),
+    }
+    fresh_q = {"q_head.0.weight": torch.tensor([3.0])}
+
+    merged = actor_checkpoint_with_fresh_q_state_dict(checkpoint, fresh_q)
+
+    torch.testing.assert_close(merged["encoder.weight"], checkpoint["encoder.weight"])
+    torch.testing.assert_close(
+        merged["actor_mean.weight"], checkpoint["actor_mean.weight"]
+    )
+    torch.testing.assert_close(merged["q_head.0.weight"], fresh_q["q_head.0.weight"])
+
+
+def test_reward_revision_rejects_q_key_mismatch():
+    with pytest.raises(ValueError, match="Fresh Q keys do not match"):
+        actor_checkpoint_with_fresh_q_state_dict(
+            {"actor_mean.weight": torch.ones(1), "q_head.weight": torch.ones(1)},
+            {},
+        )

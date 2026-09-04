@@ -61,17 +61,24 @@ class ENPIREEmbodiedRunner(EmbodiedRunner):
             decision.manager_called,
             decision.candidate_digest,
         )
-        if decision.rollback_checkpoint is not None:
+        if decision.manager_called:
+            actor_checkpoint = decision.rollback_checkpoint or checkpoint_path
+            actor_path = os.path.join(actor_checkpoint, "actor")
+            self.logger.info(
+                "Reward changed: restoring actor only from %s and resetting "
+                "Q, target Q, alpha, optimizers, and replay.",
+                actor_path,
+            )
+            self.actor.restore_actor_for_reward_revision(actor_path).wait()
+            self.actor.clear_replay_buffer().wait()
+            self.update_rollout_weights()
+        elif decision.rollback_checkpoint is not None:
             actor_path = os.path.join(decision.rollback_checkpoint, "actor")
             self.logger.info(
-                "Rolling actor, critics, optimizers, and replay back to %s.",
+                "Reward unchanged after Manager failure: restoring the matching "
+                "actor, critics, optimizers, and replay from %s.",
                 actor_path,
             )
             self.actor.load_checkpoint(actor_path).wait()
             self.update_rollout_weights()
-        if decision.manager_called:
-            self.logger.info(
-                "Clearing replay before collecting the new reward revision."
-            )
-            self.actor.clear_replay_buffer().wait()
         return eval_metrics

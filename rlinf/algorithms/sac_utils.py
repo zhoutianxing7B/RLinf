@@ -20,6 +20,32 @@ def actor_only_warmup_state_dict(
     return {name: tensor for name, tensor in state_dict.items() if "q_head" not in name}
 
 
+def actor_checkpoint_with_fresh_q_state_dict(
+    checkpoint_state: dict[str, torch.Tensor],
+    fresh_q_state: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    """Combine a checkpoint actor with reward-independent fresh Q parameters.
+
+    Reward revisions invalidate learned Q values. This helper deliberately
+    restores all non-Q policy parameters from the accepted checkpoint while
+    replacing every Q-head tensor with its initialization-time value.
+    """
+    checkpoint_q_keys = {
+        name for name in checkpoint_state if "q_head" in name
+    }
+    if checkpoint_q_keys != set(fresh_q_state):
+        missing = sorted(checkpoint_q_keys - set(fresh_q_state))
+        unexpected = sorted(set(fresh_q_state) - checkpoint_q_keys)
+        raise ValueError(
+            "Fresh Q keys do not match the actor checkpoint: "
+            f"missing={missing}, unexpected={unexpected}"
+        )
+    return {
+        name: (fresh_q_state[name] if name in checkpoint_q_keys else tensor)
+        for name, tensor in checkpoint_state.items()
+    }
+
+
 def discounted_chunk_rewards(rewards: torch.Tensor, gamma: float) -> torch.Tensor:
     """Aggregate per-step rewards for an action chunk with SAC discounting.
 

@@ -24,6 +24,7 @@ from omegaconf import DictConfig
 from torch.utils.data import DataLoader
 
 from rlinf.algorithms.sac_utils import (
+    actor_checkpoint_with_fresh_q_state_dict,
     actor_only_warmup_state_dict,
     behavior_regularized_actor_loss,
     discounted_chunk_rewards,
@@ -108,6 +109,7 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
         self.setup_model_and_optimizer(initialize_target=True)
         self.setup_sac_components()
         self.soft_update_target_model(tau=1.0)
+        self._capture_reward_revision_initial_state()
         if self.use_dsrl:
             self._init_target_shadow()
         if self.cfg.actor.get("enable_offload", False):
@@ -385,6 +387,73 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
                             online_param.data.float(), alpha=tau
                         )
                         target_param.data.copy_(shadow.to(target_param.data.dtype))
+
+    def _capture_reward_revision_initial_state(self) -> None:
+        """Keep fresh Q and entropy parameters for later reward revisions."""
+        initial_state = self._strategy.get_model_state_dict(
+            self.model, cpu_offload=False, full_state_dict=True
+        )
+        self._fresh_q_state_dict = {
+            name: tensor.detach().cpu().clone()
+            for name, tensor in initial_state.items()
+            if "q_head" in name
+        }
+        if not self._fresh_q_state_dict:
+            raise ValueError("SAC reward revisions require at least one Q-head tensor")
+        self._fresh_entropy_state_dict = {
+            name: tensor.detach().cpu().clone()
+            for name, tensor in self.entropy_temp.state_dict().items()
+        }
+
+    def restore_actor_for_reward_revision(self, load_base_path: str) -> dict[str, float]:
+        """Restore only actor state and reset all reward-dependent SAC state.
+
+        The accepted checkpoint supplies the policy and shared representation.
+        Q heads, target Q heads, entropy temperature, optimizer moments, and
+        replay are deliberately not inherited across a reward change.
+        """
+        full_weights_path = os.path.join(
+            load_base_path, "model_state_dict", "full_weights.pt"
+        )
+        if not os.path.isfile(full_weights_path):
+            raise FileNotFoundError(
+                f"Actor-only reward revision checkpoint not found: {full_weights_path}"
+            )
+        checkpoint_state = torch.load(
+            full_weights_path, map_location="cpu", weights_only=True
+        )
+        revised_state = actor_checkpoint_with_fresh_q_state_dict(
+            checkpoint_state, self._fresh_q_state_dict
+        )
+        self._strategy.load_model_with_state_dict(
+            self.model,
+            revised_state,
+            cpu_offload=False,
+            full_state_dict=True,
+        )
+        self._strategy.load_model_with_state_dict(
+            self.target_model,
+            revised_state,
+            cpu_offload=False,
+            full_state_dict=True,
+        )
+        self.entropy_temp.load_state_dict(self._fresh_entropy_state_dict)
+        for optimizer in (self.optimizer, self.qf_optimizer, self.alpha_optimizer):
+            if optimizer is not None:
+                optimizer.zero_grad(set_to_none=True)
+                optimizer.state.clear()
+        self.update_step = 0
+        if self.use_dsrl:
+            self._init_target_shadow()
+        self.logger.info(
+            "Restored actor from %s with fresh Q, target Q, alpha, and optimizer state.",
+            full_weights_path,
+        )
+        return {
+            "actor_restored": 1.0,
+            "q_reset": 1.0,
+            "alpha_reset": 1.0,
+        }
 
     def clear_replay_buffer(self) -> dict[str, float]:
         """Drop transitions labeled by an obsolete reward revision."""
